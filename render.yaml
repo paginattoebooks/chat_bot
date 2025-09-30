@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: paginatto-bot
+    runtime: python
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
