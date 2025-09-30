@@ -13,6 +13,8 @@ from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
+from offer_rules import build_offer
+
 # Cache/state
 REDIS_URL = os.getenv("REDIS_URL")
 try:
