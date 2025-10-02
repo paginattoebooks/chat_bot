@@ -12,7 +12,6 @@ import httpx
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
-
 from offer_rules import build_offer
 
 # Cache/state
@@ -37,8 +36,6 @@ ZAPI_BASE = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}"
 
 CARTPANDA_WEBHOOK_SECRET = os.getenv("CARTPANDA_WEBHOOK_SECRET", "")
 ZAPI_WEBHOOK_SECRET = os.getenv("ZAPI_WEBHOOK_SECRET", "")
-
-from .offer_rules import build_offer
 
 app = FastAPI(title="Paginatto Bot", version="1.0.0")
 
