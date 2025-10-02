@@ -27,8 +27,14 @@ BRAND_NAME     = os.getenv("BRAND_NAME", "Paginatto")
 # Z-API (seguindo o formato enviado pelo suporte: /instances/{INSTANCE}/message/text + Client-Token no header)
 ZAPI_INSTANCE   = os.getenv("ZAPI_INSTANCE", "").strip()
 CLIENT_TOKEN    = (os.getenv("ZAPI_TOKEN") or os.getenv("ZAPI_CLIENT_TOKEN") or "").strip()
-ZAPI_MSG_URL    = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/message/text".rstrip("/")
 
+ZAPI_BASE = (os.getenv("ZAPI_BASE") or "").strip()
+if ZAPI_BASE:
+    # ex.: https://api.z-api.io/instances/3E2D08AA912D5063906206E9A5181015/token/45351C39E4EDCB47C2466177/send-text
+    ZAPI_MSG_URL = ZAPI_BASE
+else:
+    # fallback novo formato
+    ZAPI_MSG_URL = f"https://api.z-api.io/instances/3E2D08AA912D5063906206E9A5181015/token/45351C39E4EDCB47C2466177/send-text"
 # Webhook secrets (opcionais; se vazios, não bloqueiam)
 CARTPANDA_WEBHOOK_SECRET = os.getenv("CARTPANDA_WEBHOOK_SECRET", "").strip()
 ZAPI_WEBHOOK_SECRET      = os.getenv("ZAPI_WEBHOOK_SECRET", "").strip()
@@ -91,24 +97,13 @@ def clear_ctx(phone: str) -> None:
 
 # -------------------- Helpers (Z-API) --------------------
 async def zapi_send_text(phone: str, message: str) -> dict:
-    """
-    Envia texto usando o formato recomendado pelo suporte:
-    POST /instances/{INSTANCE}/message/text
-    Headers:
-      - Content-Type: application/json
-      - Client-Token: <token>
-    Body:
-      { "phone": "55119...", "message": "..." }
-    """
-    if not ZAPI_INSTANCE or not CLIENT_TOKEN:
-        log.error("Z-API não configurada (ZAPI_INSTANCE/CLIENT_TOKEN).")
+    if not (ZAPI_MSG_URL and CLIENT_TOKEN):
+        log.error("Z-API não configurada (ZAPI_MSG_URL/CLIENT_TOKEN).")
         return {"ok": False, "error": "zapi_not_configured"}
 
-    headers = {
-        "Content-Type": "application/json",
-        "Client-Token": CLIENT_TOKEN,
-    }
+    headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
     payload = {"phone": phone, "message": message}
+    log.info("Z-API POST %s payload=%s", ZAPI_MSG_URL, payload)
 
     try:
         async with httpx.AsyncClient(timeout=20) as http:
