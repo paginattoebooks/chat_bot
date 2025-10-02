@@ -14,37 +14,39 @@ from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from offer_rules import build_offer
-from fastapi import Header
-from starlette.responses import JSONResponse
 
 # -------------------- Bootstrap (.env, log) --------------------
-load_dotenv()  # garante leitura local
+load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("paginatto")
 
 # -------------------- Config --------------------
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Iara")
-BRAND_NAME     = os.getenv("BRAND_NAME", "Paginatto")
+BRAND_NAME = os.getenv("BRAND_NAME", "Paginatto")
 
-# Z-API (seguindo o formato enviado pelo suporte: /instances/{INSTANCE}/message/text + Client-Token no header)
-ZAPI_INSTANCE   = os.getenv("ZAPI_INSTANCE", "").strip()
-CLIENT_TOKEN    = (os.getenv("ZAPI_TOKEN") or os.getenv("ZAPI_CLIENT_TOKEN") or "").strip()
-
+# Z-API
+ZAPI_INSTANCE = (os.getenv("ZAPI_INSTANCE") or "").strip()
+ZAPI_TOKEN = (os.getenv("ZAPI_TOKEN") or "").strip()
+CLIENT_TOKEN = (os.getenv("ZAPI_CLIENT_TOKEN") or os.getenv("ZAPI_TOKEN") or "").strip()
 ZAPI_BASE = (os.getenv("ZAPI_BASE") or "").strip()
+
 if ZAPI_BASE:
-    # ex.: https://api.z-api.io/instances/3E2D08AA912D5063906206E9A5181015/token/45351C39E4EDCB47C2466177/send-text
-    ZAPI_MSG_URL = ZAPI_BASE
+    ZAPI_MSG_URL = ZAPI_BASE.rstrip("/")
 else:
-    # fallback novo formato
-    ZAPI_MSG_URL = f"https://api.z-api.io/instances/3E2D08AA912D5063906206E9A5181015/token/45351C39E4EDCB47C2466177/send-text"
-# Webhook secrets (opcionais; se vazios, não bloqueiam)
-CARTPANDA_WEBHOOK_SECRET = os.getenv("CARTPANDA_WEBHOOK_SECRET", "").strip()
-ZAPI_WEBHOOK_SECRET      = os.getenv("ZAPI_WEBHOOK_SECRET", "").strip()
+    # fallback para o endpoint que você testou via PowerShell (send-text)
+    ZAPI_MSG_URL = (
+        f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}/send-text"
+    )
+
+# Webhook secrets (opcionais)
+CARTPANDA_WEBHOOK_SECRET = (os.getenv("CARTPANDA_WEBHOOK_SECRET") or "").strip()
+ZAPI_WEBHOOK_SECRET = (os.getenv("ZAPI_WEBHOOK_SECRET") or "").strip()
 
 # Redis (opcional)
-REDIS_URL = os.getenv("REDIS_URL", "").strip()
+REDIS_URL = (os.getenv("REDIS_URL") or "").strip()
 try:
     import redis  # type: ignore
+
     rds = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
 except Exception:
     rds = None
@@ -54,6 +56,7 @@ app = FastAPI(title="Paginatto Bot", version="1.0.0")
 
 # -------------------- Helpers (estado) --------------------
 _MEM: Dict[str, Tuple[datetime, str]] = {}  # fallback em memória
+
 
 def normalize_phone(raw: Optional[str]) -> Optional[str]:
     if not raw:
@@ -65,22 +68,31 @@ def normalize_phone(raw: Optional[str]) -> Optional[str]:
         return "55" + s
     return None
 
+
 def ttl_seconds(minutes: int = 90) -> int:
     return minutes * 60
+
 
 def store_ctx(phone: str, ctx: Dict[str, Any], minutes: int = 90) -> None:
     key = f"ctx:{phone}"
     data = json.dumps(ctx, ensure_ascii=False)
-    if rds:
-        rds.setex(key, ttl_seconds(minutes), data)
-    else:
-        _MEM[key] = (datetime.utcnow() + timedelta(minutes=minutes), data)
+    try:
+        if rds:
+            rds.setex(key, ttl_seconds(minutes), data)
+            return
+    except Exception as e:
+        log.warning("Redis indisponível (store), usando memória: %s", e)
+    _MEM[key] = (datetime.utcnow() + timedelta(minutes=minutes), data)
+
 
 def read_ctx(phone: str) -> Optional[Dict[str, Any]]:
     key = f"ctx:{phone}"
-    if rds:
-        raw = rds.get(key)
-        return json.loads(raw) if raw else None
+    try:
+        if rds:
+            raw = rds.get(key)
+            return json.loads(raw) if raw else None
+    except Exception as e:
+        log.warning("Redis indisponível (read), usando memória: %s", e)
     exp_raw = _MEM.get(key)
     if not exp_raw:
         return None
@@ -90,12 +102,16 @@ def read_ctx(phone: str) -> Optional[Dict[str, Any]]:
         return None
     return json.loads(raw)
 
+
 def clear_ctx(phone: str) -> None:
     key = f"ctx:{phone}"
-    if rds:
-        rds.delete(key)
-    else:
-        _MEM.pop(key, None)
+    try:
+        if rds:
+            rds.delete(key)
+            return
+    except Exception as e:
+        log.warning("Redis indisponível (clear), usando memória: %s", e)
+    _MEM.pop(key, None)
 
 # -------------------- Helpers (Z-API) --------------------
 async def zapi_send_text(phone: str, message: str) -> dict:
@@ -122,7 +138,79 @@ async def zapi_send_text(phone: str, message: str) -> dict:
         log.exception("Falha ao chamar Z-API:")
         return {"ok": False, "error": str(e)}
 
-# -------------------- Health --------------------
+# -------------------- Patterns --------------------
+YES_PATTERNS = [
+    r"\bsim\b",
+    r"\bisso\b",
+    r"\bconfirmo\b",
+    r"\bclaro\b",
+    r"\bpositivo\b",
+    r"\bafirmativo\b",
+    r"\bcert[oa]\b",
+]
+BOUGHT_PATTERNS = [
+    r"já comprei",
+    r"ja comprei",
+    r"comprei",
+    r"realizei a compra",
+    r"paguei",
+    r"finalizei",
+]
+QUIT_PATTERNS = [
+    r"desisti",
+    r"não vou",
+    r"nao vou",
+    r"não quero",
+    r"nao quero",
+    r"deixa pra depois",
+]
+
+
+def matches(text: str, pats) -> bool:
+    t = text.lower()
+    return any(re.search(p, t) for p in pats)
+
+# -------------------- Normalizador do corpo Z-API --------------------
+def extract_phone_and_text(body: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Normaliza vários formatos da Z-API:
+      - { "phone": "...", "text": "..." }
+      - { "phone": "...", "text": {"message": "..."} }
+      - { "message": {"phone": "...", "text": "..."} }
+      - { "data": {"message": {"from": "...", "text": "..."} } }
+    """
+    def as_text(x: Any) -> Optional[str]:
+        if x is None:
+            return None
+        if isinstance(x, str):
+            return x
+        if isinstance(x, dict):
+            for k in ("message", "text", "body", "caption"):
+                v = x.get(k)
+                if isinstance(v, str):
+                    return v
+        return None
+
+    phone = body.get("phone") or body.get("from")
+    text = body.get("text") or body.get("body")
+
+    if not phone or not text:
+        msg = body.get("message") or {}
+        if isinstance(msg, dict):
+            phone = phone or msg.get("phone") or msg.get("from")
+            text = text or msg.get("text") or msg.get("body")
+
+    if not phone or not text:
+        data = body.get("data") or {}
+        m2 = (data.get("message") or {}) if isinstance(data, dict) else {}
+        if isinstance(m2, dict):
+            phone = phone or m2.get("phone") or m2.get("from")
+            text = text or m2.get("text") or m2.get("body")
+
+    text = as_text(text)
+    return normalize_phone(phone), (text.strip() if isinstance(text, str) else None)
+
+# -------------------- Health & Root --------------------
 @app.get("/health")
 async def health():
     return {
@@ -133,6 +221,7 @@ async def health():
         "redis": bool(rds),
     }
 
+
 @app.get("/")
 async def root():
     return {
@@ -142,9 +231,9 @@ async def root():
         "assistant": ASSISTANT_NAME,
     }
 
-# -------------------- CartPanda webhook --------------------
+# -------------------- CartPanda webhook (cria contexto e dispara 1ª msg) --------------------
 """
-Exemplo de payload (ajuste conforme sua loja):
+Exemplo (ajuste conforme sua loja):
 {
   "event": "checkout_abandoned" | "pix_pending",
   "customer": {"name": "Fulano", "phone": "11988887777"},
@@ -152,20 +241,59 @@ Exemplo de payload (ajuste conforme sua loja):
   "order": {"id": "ABC123", "total": 29.9}
 }
 """
+@app.post("/webhook/cartpanda")
+async def cartpanda_webhook(
+    request: Request,
+    x_cartpanda_secret: Optional[str] = Header(None),
+):
+    if CARTPANDA_WEBHOOK_SECRET and x_cartpanda_secret != CARTPANDA_WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="invalid secret")
 
+    payload = await request.json()
+    log.info("CartPanda payload: %s", payload)
+
+    event = (payload.get("event") or "").strip().lower()
+    cust = payload.get("customer") or {}
+    prod = payload.get("product") or {}
+    order = payload.get("order") or {}
+
+    phone = normalize_phone(cust.get("phone"))
+    name = (cust.get("name") or "").strip()
+    product_name = (prod.get("name") or "").strip()
+    checkout_url = (prod.get("checkout_url") or "").strip()
+
+    if not phone or not product_name:
+        return JSONResponse({"ok": False, "reason": "missing phone or product"}, status_code=200)
+
+    flow = "abandoned" if event == "checkout_abandoned" else "pix_pending" if event == "pix_pending" else "unknown"
+    ctx = {
+        "flow": flow,
+        "name": name,
+        "product_name": product_name,
+        "checkout_url": checkout_url,
+        "order": order,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    store_ctx(phone, ctx, minutes=180)
+
+    first = f"Oi, esse número é de {name}? Sou {ASSISTANT_NAME} da {BRAND_NAME}."
+    await zapi_send_text(phone, first)
+    return {"ok": True, "flow": flow}
+
+# -------------------- Z-API inbound webhook (mensagens recebidas) --------------------
 @app.post("/webhook/zapi")
 async def zapi_webhook(
     request: Request,
-    x_zapi_secret: Optional[str] = Header(None)
+    x_zapi_secret: Optional[str] = Header(None),
 ):
-    # Durante os testes, não devolva 401 (gera 500 no lado deles).
+    # Durante testes, não falhe com 401 (a Z-API marca como erro).
     if ZAPI_WEBHOOK_SECRET and x_zapi_secret != ZAPI_WEBHOOK_SECRET:
-        log.warning("Z-API secret inválido (ignorando em teste).")
+        log.warning("Z-API secret inválido (ignorado em teste).")
         return {"ok": True, "note": "invalid secret (ignored in test)"}
 
-    # Parse super-defensivo
     body: Dict[str, Any] = {}
     ctype = (request.headers.get("content-type") or "").lower()
+
     try:
         if "application/json" in ctype:
             body = await request.json()
@@ -173,7 +301,6 @@ async def zapi_webhook(
             form = await request.form()
             body = {}
             for k, v in form.items():
-                # Converte message[phone] → {"message": {"phone": "..."}}
                 if k.startswith("message[") and k.endswith("]"):
                     key = k[8:-1]
                     body.setdefault("message", {})[key] = str(v)
@@ -195,174 +322,52 @@ async def zapi_webhook(
         return {"ok": True, "note": "missing phone/text"}
 
     ctx = read_ctx(phone)
-    if not ctx:
-        await zapi_send_text(phone, f"Oi, aqui é {ASSISTANT_NAME} da {BRAND_NAME}. Como posso ajudar?")
-        return {"ok": True}
-
-    name         = ctx.get("name") or ""
-    product_name = ctx.get("product_name") or ""
-    checkout_url = ctx.get("checkout_url") or ""
-    flow         = ctx.get("flow") or "unknown"
-
-    if matches(text, YES_PATTERNS) or text.lower() in {"sou eu", "isso mesmo", "eu"}:
-        await zapi_send_text(phone, f"Você desistiu da compra de '{product_name}'?")
-        return {"ok": True}
-
-    if matches(text, BOUGHT_PATTERNS):
-        clear_ctx(phone)
-        await zapi_send_text(phone, "Obrigada pela compra. Qualquer dúvida, a equipe Paginatto está à disposição.")
-        return {"ok": True}
-
-    if matches(text, QUIT_PATTERNS):
-        headline, detail = build_offer(product_name)
-        await zapi_send_text(phone, f"{headline}\n{detail}\n\nSeu carrinho: {checkout_url}\nPosso aplicar agora e finalizar com você?")
-        return {"ok": True}
-
-    if any(k in text.lower() for k in ["quero retomar","quero comprar","manda o link","pode aplicar","vamos fechar"]):
-        await zapi_send_text(phone, f"Perfeito, {name}. Segue seu link para concluir: {checkout_url}")
-        return {"ok": True}
-
-    if any(k in text.lower() for k in ["qual o preço","valor","tem desconto","até quando","formas de pagamento","pix","cartão","cartao"]):
-        headline, detail = build_offer(product_name)
-        await zapi_send_text(phone, f"{headline}\n{detail}\nPagamento por PIX ou cartão. Se preferir, envio o QR ou o link direto.")
-        return {"ok": True}
-
-    msg = (f"Detectei um PIX pendente de '{product_name}'. Quer que eu reenvie o QR/link agora?"
-           if flow == "pix_pending"
-           else f"Posso te ajudar a concluir '{product_name}'. Prefere link direto ou quer tirar alguma dúvida primeiro?")
-    await zapi_send_text(phone, msg)
-    return {"ok": True}
-
-# -------------------- Z-API inbound webhook (mensagens recebidas) --------------------
-"""
-Configure na Z-API o webhook de mensagens PARA:
-  POST https://seu-dominio/webhook/zapi
-
-Corpos comuns que vemos (a API pode variar ligeiramente):
-- { "message": { "phone": "55119...", "text": "..." } }
-- { "phone": "55119...", "text": "..." }
-- { "data": { "message": { "from": "55119...", "text": "..." } } }
-"""
-
-YES_PATTERNS    = [r"\bsim\b", r"\bisso\b", r"\bconfirmo\b", r"\bclaro\b", r"\bpositivo\b", r"\bafirmativo\b", r"\bcert[oa]\b"]
-BOUGHT_PATTERNS = [r"já comprei", r"ja comprei", r"comprei", r"realizei a compra", r"paguei", r"finalizei"]
-QUIT_PATTERNS   = [r"desisti", r"não vou", r"nao vou", r"não quero", r"nao quero", r"deixa pra depois"]
-
-def matches(text: str, pats) -> bool:
-    t = text.lower()
-    return any(re.search(p, t) for p in pats)
-
-def extract_phone_and_text(body: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Normaliza vários formatos da Z-API:
-      - { "phone": "...", "text": "..." }
-      - { "phone": "...", "text": {"message": "..."} }
-      - { "message": {"phone": "...", "text": "..."} }
-      - { "data": {"message": {"from": "...", "text": "..."} } }
-    """
-    def as_text(x: Any) -> Optional[str]:
-        if x is None:
-            return None
-        if isinstance(x, str):
-            return x
-        if isinstance(x, dict):
-            # chaves mais comuns
-            for k in ("message", "text", "body", "caption"):
-                v = x.get(k)
-                if isinstance(v, str):
-                    return v
-        # último recurso: não forçar dict/list em string
-        return None
-
-    # direto
-    phone = body.get("phone") or body.get("from")
-    text  = body.get("text")  or body.get("body")
-
-    # aninhado em "message"
-    if not phone or not text:
-        msg = body.get("message") or {}
-        if isinstance(msg, dict):
-            phone = phone or msg.get("phone") or msg.get("from")
-            text  = text  or msg.get("text")  or msg.get("body")
-
-    # aninhado em "data.message"
-    if not phone or not text:
-        data = body.get("data") or {}
-        m2   = (data.get("message") or {}) if isinstance(data, dict) else {}
-        if isinstance(m2, dict):
-            phone = phone or m2.get("phone") or m2.get("from")
-            text  = text  or m2.get("text")  or m2.get("body")
-
-    # caso especial: text veio como dict (ex.: {"message": "oi"})
-    text = as_text(text)
-
-    return normalize_phone(phone), (text.strip() if isinstance(text, str) else None)
-
-@app.post("/webhook/zapi")
-async def zapi_webhook(
-    request: Request,
-    x_zapi_secret: Optional[str] = Header(None)
-):
-    if ZAPI_WEBHOOK_SECRET and x_zapi_secret != ZAPI_WEBHOOK_SECRET:
-        raise HTTPException(status_code=401, detail="invalid secret")
-
-    # <- antes era: body = await request.json()
-    try:
-        body = await request.json()
-    except Exception:
-        # pode ter vindo texto, form-data ou vazio; não quebre o webhook
-        raw = (await request.body()).decode("utf-8", "ignore")
-        log.warning("Z-API inbound (não-JSON): %s", raw)
-        return {"ok": True}   # sempre 200 para a Z-API não marcar como erro
-
-
-    phone, text = extract_phone_and_text(body)
-    if not phone or not text:
-        return {"ok": True, "note": "missing phone/text"}
-
-    ctx = read_ctx(phone)
 
     # Sem contexto → saudação padrão
     if not ctx:
         await zapi_send_text(phone, f"Oi, aqui é {ASSISTANT_NAME} da {BRAND_NAME}. Como posso ajudar?")
         return {"ok": True}
 
-    name         = ctx.get("name") or ""
+    name = ctx.get("name") or ""
     product_name = ctx.get("product_name") or ""
     checkout_url = ctx.get("checkout_url") or ""
-    flow         = ctx.get("flow") or "unknown"
+    flow = ctx.get("flow") or "unknown"
 
     # 1) Confirmação do número
     if matches(text, YES_PATTERNS) or text.lower() in {"sou eu", "isso mesmo", "eu"}:
-        q = f"Você desistiu da compra de '{product_name}'?"
-        await zapi_send_text(phone, q)
+        await zapi_send_text(phone, f"Você desistiu da compra de '{product_name}'?")
         return {"ok": True}
 
     # 2) Cliente afirma que já comprou
     if matches(text, BOUGHT_PATTERNS):
         clear_ctx(phone)
-        thanks = "Obrigada pela compra. Qualquer dúvida, a equipe Paginatto está à disposição."
-        await zapi_send_text(phone, thanks)
+        await zapi_send_text(phone, "Obrigada pela compra. Qualquer dúvida, a equipe Paginatto está à disposição.")
         return {"ok": True}
 
     # 3) Cliente diz que desistiu → ofertar condição
     if matches(text, QUIT_PATTERNS):
         headline, detail = build_offer(product_name)
-        msg = f"{headline}\n{detail}\n\nSeu carrinho: {checkout_url}\nPosso aplicar agora e finalizar com você?"
-        await zapi_send_text(phone, msg)
+        await zapi_send_text(
+            phone,
+            f"{headline}\n{detail}\n\nSeu carrinho: {checkout_url}\nPosso aplicar agora e finalizar com você?",
+        )
         return {"ok": True}
 
     # 4) Cliente quer retomar
     if any(k in text.lower() for k in ["quero retomar", "quero comprar", "manda o link", "pode aplicar", "vamos fechar"]):
-        go = f"Perfeito, {name}. Segue seu link para concluir: {checkout_url}"
-        await zapi_send_text(phone, go)
+        await zapi_send_text(phone, f"Perfeito, {name}. Segue seu link para concluir: {checkout_url}")
         return {"ok": True}
 
     # 5) Dúvidas comuns
-    if any(k in text.lower() for k in ["qual o preço", "valor", "tem desconto", "até quando", "formas de pagamento", "pix", "cartão", "cartao"]):
+    if any(
+        k in text.lower()
+        for k in ["qual o preço", "valor", "tem desconto", "até quando", "formas de pagamento", "pix", "cartão", "cartao"]
+    ):
         headline, detail = build_offer(product_name)
-        info = f"{headline}\n{detail}\nPagamento por PIX ou cartão. Se preferir, envio o QR ou o link direto."
-        await zapi_send_text(phone, info)
+        await zapi_send_text(
+            phone,
+            f"{headline}\n{detail}\nPagamento por PIX ou cartão. Se preferir, envio o QR ou o link direto.",
+        )
         return {"ok": True}
 
     # 6) Fallback conforme fluxo
@@ -372,3 +377,9 @@ async def zapi_webhook(
         msg = f"Posso te ajudar a concluir '{product_name}'. Prefere link direto ou quer tirar alguma dúvida primeiro?"
     await zapi_send_text(phone, msg)
     return {"ok": True}
+
+# Evita 404 da Z-API para pings de status
+@app.post("/webhook/zapi/status")
+async def zapi_status():
+    return {"ok": True}
+
