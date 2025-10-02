@@ -7,7 +7,7 @@ Stack: FastAPI + Z-API + (Redis opcional)
 # -------------------- Imports --------------------
 import os, re, json, logging
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 
 import httpx
 from fastapi import FastAPI, Request, Header, HTTPException
@@ -33,10 +33,8 @@ ZAPI_BASE = (os.getenv("ZAPI_BASE") or "").strip()
 if ZAPI_BASE:
     ZAPI_MSG_URL = ZAPI_BASE.rstrip("/")
 else:
-    # fallback para o endpoint que você testou via PowerShell (send-text)
-    ZAPI_MSG_URL = (
-        f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}/send-text"
-    )
+    # fallback para o endpoint testado via PowerShell (send-text)
+    ZAPI_MSG_URL = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}/send-text"
 
 # Webhook secrets (opcionais)
 CARTPANDA_WEBHOOK_SECRET = (os.getenv("CARTPANDA_WEBHOOK_SECRET") or "").strip()
@@ -73,7 +71,7 @@ def ttl_seconds(minutes: int = 90) -> int:
     return minutes * 60
 
 
-def store_ctx(phone: str, ctx: Dict[str, Any], minutes: int = 90) -> None:
+def store_ctx(phone: str, ctx: Dict[str, Any], minutes: int = 180) -> None:
     key = f"ctx:{phone}"
     data = json.dumps(ctx, ensure_ascii=False)
     try:
@@ -138,7 +136,7 @@ async def zapi_send_text(phone: str, message: str) -> dict:
         log.exception("Falha ao chamar Z-API:")
         return {"ok": False, "error": str(e)}
 
-# -------------------- Patterns --------------------
+# -------------------- Patterns & Intents --------------------
 YES_PATTERNS = [
     r"\bsim\b",
     r"\bisso\b",
@@ -147,6 +145,11 @@ YES_PATTERNS = [
     r"\bpositivo\b",
     r"\bafirmativo\b",
     r"\bcert[oa]\b",
+]
+NO_PATTERNS = [
+    r"\bn[aã]o\b",
+    r"\bnegativo\b",
+    r"\bnope\b",
 ]
 BOUGHT_PATTERNS = [
     r"já comprei",
@@ -164,11 +167,60 @@ QUIT_PATTERNS = [
     r"nao quero",
     r"deixa pra depois",
 ]
+STOP_PATTERNS = [
+    r"\bpare\b", r"\bpara\b", r"\bstop\b", r"\bcancelar\b", r"\bcancele\b",
+    r"\bsair\b", r"\bremover\b", r"\bexcluir\b", r"\bdescadastrar\b",
+    r"n[aã]o quero (conversar|falar)", r"n[aã]o me (chame|incomode|envie|mande)",
+]
 
+INTENTS: Dict[str, List[str]] = {
+    # saudações e educação
+    "greeting": [r"\b(oi|ol[aá]|eai|boa\s+noite|boa\s+tarde|bom\s+dia)\b"],
+    "thanks": [r"\bobrigad[oa]\b", r"\bvaleu\b"],
+    # encerrar/opt-out
+    "stop": STOP_PATTERNS,
+    # entrega / rastreio (produto é digital)
+    "shipping": [
+        r"\b(entrega|frete|prazo|chega|chegada|quando\s+chega|vai\s+chegar)\b",
+        r"\b(rastreio|rastreamento|c[oó]digo\s+de\s+rastreio|correios|sedex)\b",
+        r"\b(endere[cç]o|resid[eê]ncia|receber\s+em\s+casa|envio\s+f[ií]sico)\b",
+    ],
+    # formas de pagamento
+    "payment": [
+        r"\bpix\b", r"\bcart[aã]o\b", r"\bcr[eé]dito\b", r"\bdebito\b",
+        r"\bparcel", r"forma(s)? de pagamento", r"\bboleto\b",
+    ],
+    # preço / desconto / promo
+    "price": [r"\b(pre[cç]o|valor|quanto\s+custa|qnto)\b"],
+    "discount": [r"\b(desconto|cupom|promo[cç][aã]o|oferta)\b"],
+    "deadline": [r"\bat[ée]\s+quando\b", r"\b(valid[ao]|vence|prazo\s+da\s+promo)\b"],
+    # link / retomada
+    "link": [r"\blink\b", r"manda(r)?\s+o?\s*link", r"quero\s+comprar", r"pode\s+aplicar", r"vamos\s+fechar"],
+    # dúvidas gerais
+    "product_info": [r"como\s+funciona", r"o\s+que\s+[ée]", r"conte[úu]do", r"do\s+que\s+se\s+trata"],
+    # pós-compra: não recebeu e-mail / reenvio
+    "email_missing": [r"n[aã]o\s+(recebi|chegou).*(email|e-?mail|link)", r"cade\s+o\s+(email|e-?mail|link)"],
+    "resend": [r"\b(reenvia|reenviar|enviar\s+de\s+novo|manda\s+de\s+novo|mandar\s+novamente)\b"],
+}
 
-def matches(text: str, pats) -> bool:
+def matches(text: str, pats: List[str]) -> bool:
     t = text.lower()
     return any(re.search(p, t) for p in pats)
+
+def detect_intent(text: str) -> str:
+    for intent, patterns in INTENTS.items():
+        if matches(text, patterns):
+            return intent
+    # apoia classificações "sim/não" e fluxos específicos
+    if matches(text, YES_PATTERNS):
+        return "yes"
+    if matches(text, NO_PATTERNS):
+        return "no"
+    if matches(text, BOUGHT_PATTERNS):
+        return "bought"
+    if matches(text, QUIT_PATTERNS):
+        return "quit"
+    return "unknown"
 
 # -------------------- Normalizador do corpo Z-API --------------------
 def extract_phone_and_text(body: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
@@ -273,12 +325,158 @@ async def cartpanda_webhook(
         "checkout_url": checkout_url,
         "order": order,
         "created_at": datetime.utcnow().isoformat(),
+        # estado de conversa
+        "confirmed_owner": False,
+        "asked": None,
+        "last_intent": None,
     }
     store_ctx(phone, ctx, minutes=180)
 
     first = f"Oi, esse número é de {name}? Sou {ASSISTANT_NAME} da {BRAND_NAME}."
     await zapi_send_text(phone, first)
     return {"ok": True, "flow": flow}
+
+# -------------------- Router de intenções --------------------
+async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str) -> Dict[str, Any]:
+    name         = ctx.get("name") or ""
+    product_name = ctx.get("product_name") or ""
+    checkout_url = ctx.get("checkout_url") or ""
+    flow         = ctx.get("flow") or "unknown"
+
+    # ----- opt-out / stop -----
+    if intent == "stop" or intent == "quit":
+        await zapi_send_text(phone, "Entendido. Vou encerrar por aqui. 🙏 Se mudar de ideia, é só chamar. Boa semana!")
+        clear_ctx(phone)
+        return {"ok": True}
+
+    # ----- pós-compra informado -----
+    if intent == "bought":
+        clear_ctx(phone)
+        await zapi_send_text(phone, "Obrigada pela compra! 🎉 Qualquer dúvida, estamos à disposição por aqui.")
+        return {"ok": True}
+
+    # ----- shipping (produto digital) -----
+    if intent == "shipping":
+        await zapi_send_text(
+            phone,
+            "Nosso produto é **100% digital (PDF/e-book)** — não existe frete nem envio físico.\n"
+            "Assim que o pagamento é aprovado, você recebe o **link de download** no seu e-mail cadastrado "
+            "e, se preferir, posso te enviar o link por aqui também.\n\n"
+            "Se você já pagou e não encontrou o e-mail, olhe a caixa *Spam/Lixo/Promoções*. Quer que eu reenvie?"
+        )
+        ctx["asked"] = "resend_link"
+        store_ctx(phone, ctx)
+        return {"ok": True}
+
+    # ----- pagamento -----
+    if intent == "payment":
+        await zapi_send_text(
+            phone,
+            "Aceitamos **PIX** e **cartão** (com parcelamento). Como é digital, a liberação é **imediata** após aprovação: "
+            "você recebe o link de download no e-mail cadastrado (posso mandar por aqui também). "
+            "Prefere pagar via PIX ou cartão?"
+        )
+        store_ctx(phone, ctx)
+        return {"ok": True}
+
+    # ----- preço / desconto / deadline -----
+    if intent in ("price", "discount", "deadline"):
+        headline, detail = build_offer(product_name)
+        extra = ""
+        if intent == "deadline":
+            extra = "\n*Validade:* promoções podem ser por tempo limitado."
+        await zapi_send_text(phone, f"{headline}\n{detail}{extra}\nQuer que eu gere o link com a condição?")
+        ctx["asked"] = "apply_offer"
+        store_ctx(phone, ctx)
+        return {"ok": True}
+
+    # ----- link direto / retomar -----
+    if intent == "link":
+        await zapi_send_text(phone, f"Perfeito, {name}. Segue seu link para concluir: {checkout_url}")
+        store_ctx(phone, ctx)
+        return {"ok": True}
+
+    # ----- dúvidas gerais -----
+    if intent == "product_info":
+        await zapi_send_text(
+            phone,
+            f"O *{product_name}* é um material digital (PDF) com conteúdo prático para você aplicar hoje mesmo. "
+            "Se quiser, te envio um resumo do conteúdo e o link para concluir quando for melhor para você."
+        )
+        store_ctx(phone, ctx)
+        return {"ok": True}
+
+    # ----- e-mail não recebido / reenvio -----
+    if intent == "email_missing":
+        await zapi_send_text(
+            phone,
+            "Se o pagamento já foi aprovado e o e-mail não chegou, confira *Spam/Lixo/Promoções*. "
+            "Se preferir, posso **reencaminhar** o link por aqui. Quer que eu envie agora?"
+        )
+        ctx["asked"] = "resend_link"
+        store_ctx(phone, ctx)
+        return {"ok": True}
+
+    if intent == "resend":
+        await zapi_send_text(phone, "Claro! Pode me confirmar o e-mail cadastrado ou prefere que eu mande o link por aqui mesmo?")
+        ctx["asked"] = "get_email_or_whatsapp"
+        store_ctx(phone, ctx)
+        return {"ok": True}
+
+    # ----- educação -----
+    if intent == "greeting":
+        # Evita repetir saudação se já temos contexto ativo
+        if not ctx.get("confirmed_owner"):
+            await zapi_send_text(phone, f"Oi, aqui é {ASSISTANT_NAME} da {BRAND_NAME}. Como posso ajudar?")
+        else:
+            await zapi_send_text(phone, "Oi! 😊 Como posso ajudar você a finalizar?")
+        store_ctx(phone, ctx)
+        return {"ok": True}
+
+    if intent == "thanks":
+        await zapi_send_text(phone, "Imagina! Qualquer coisa é só chamar. 🙌")
+        store_ctx(phone, ctx)
+        return {"ok": True}
+
+    # ----- yes/no contextual -----
+    asked = ctx.get("asked")
+    if intent == "yes":
+        if asked == "confirm_desist":
+            # cliente confirmou que desistiu
+            headline, detail = build_offer(product_name)
+            await zapi_send_text(
+                phone,
+                f"{headline}\n{detail}\n\nSeu carrinho: {checkout_url}\nPosso aplicar agora e finalizar com você?"
+            )
+            ctx["asked"] = "apply_offer"
+            store_ctx(phone, ctx)
+            return {"ok": True}
+        if asked == "apply_offer":
+            await zapi_send_text(phone, f"Perfeito! Aqui está o link atualizado para concluir: {checkout_url}")
+            ctx["asked"] = None
+            store_ctx(phone, ctx)
+            return {"ok": True}
+        if asked == "resend_link":
+            await zapi_send_text(phone, "Fechado! Vou reencaminhar por aqui assim que possível. 👍")
+            ctx["asked"] = None
+            store_ctx(phone, ctx)
+            return {"ok": True}
+
+    if intent == "no":
+        if asked in ("confirm_desist", "apply_offer", "resend_link"):
+            await zapi_send_text(phone, "Sem problemas! Se surgir qualquer dúvida, estou por aqui. 😉")
+            ctx["asked"] = None
+            store_ctx(phone, ctx)
+            return {"ok": True}
+
+    # ----- fallback conforme fluxo -----
+    if flow == "pix_pending":
+        msg = f"Detectei um PIX pendente do *{product_name}*. Quer que eu reenvie o QR/link agora?"
+    else:
+        msg = f"Posso te ajudar a concluir *{product_name}*. Prefere link direto ou quer tirar alguma dúvida primeiro?"
+    await zapi_send_text(phone, msg)
+    store_ctx(phone, ctx)
+    return {"ok": True}
 
 # -------------------- Z-API inbound webhook (mensagens recebidas) --------------------
 @app.post("/webhook/zapi")
@@ -323,60 +521,41 @@ async def zapi_webhook(
 
     ctx = read_ctx(phone)
 
-    # Sem contexto → saudação padrão
+    # Se não há contexto (mensagem solta), cumprimente uma vez
     if not ctx:
         await zapi_send_text(phone, f"Oi, aqui é {ASSISTANT_NAME} da {BRAND_NAME}. Como posso ajudar?")
+        # cria um contexto mínimo para não saudar em loop
+        ctx = {
+            "flow": "unknown",
+            "name": "",
+            "product_name": "",
+            "checkout_url": "",
+            "created_at": datetime.utcnow().isoformat(),
+            "confirmed_owner": True,
+            "asked": None,
+            "last_intent": None,
+        }
+        store_ctx(phone, ctx)
         return {"ok": True}
 
-    name = ctx.get("name") or ""
-    product_name = ctx.get("product_name") or ""
-    checkout_url = ctx.get("checkout_url") or ""
-    flow = ctx.get("flow") or "unknown"
+    # confirmação de titularidade (primeiro contato pós-disparo)
+    if not ctx.get("confirmed_owner"):
+        if matches(text, YES_PATTERNS) or text.lower() in {"sou eu", "isso mesmo", "eu"}:
+            ctx["confirmed_owner"] = True
+            ctx["asked"] = "confirm_desist"
+            store_ctx(phone, ctx)
+            await zapi_send_text(phone, f"Você desistiu da compra de '{ctx.get('product_name')}'?")
+            return {"ok": True}
+        else:
+            # ainda não confirmou — mantenha a conversa aberta, sem looping de saudação
+            await zapi_send_text(phone, f"Sou {ASSISTANT_NAME} da {BRAND_NAME}. Posso te ajudar a finalizar o pedido?")
+            return {"ok": True}
 
-    # 1) Confirmação do número
-    if matches(text, YES_PATTERNS) or text.lower() in {"sou eu", "isso mesmo", "eu"}:
-        await zapi_send_text(phone, f"Você desistiu da compra de '{product_name}'?")
-        return {"ok": True}
-
-    # 2) Cliente afirma que já comprou
-    if matches(text, BOUGHT_PATTERNS):
-        clear_ctx(phone)
-        await zapi_send_text(phone, "Obrigada pela compra. Qualquer dúvida, a equipe Paginatto está à disposição.")
-        return {"ok": True}
-
-    # 3) Cliente diz que desistiu → ofertar condição
-    if matches(text, QUIT_PATTERNS):
-        headline, detail = build_offer(product_name)
-        await zapi_send_text(
-            phone,
-            f"{headline}\n{detail}\n\nSeu carrinho: {checkout_url}\nPosso aplicar agora e finalizar com você?",
-        )
-        return {"ok": True}
-
-    # 4) Cliente quer retomar
-    if any(k in text.lower() for k in ["quero retomar", "quero comprar", "manda o link", "pode aplicar", "vamos fechar"]):
-        await zapi_send_text(phone, f"Perfeito, {name}. Segue seu link para concluir: {checkout_url}")
-        return {"ok": True}
-
-    # 5) Dúvidas comuns
-    if any(
-        k in text.lower()
-        for k in ["qual o preço", "valor", "tem desconto", "até quando", "formas de pagamento", "pix", "cartão", "cartao"]
-    ):
-        headline, detail = build_offer(product_name)
-        await zapi_send_text(
-            phone,
-            f"{headline}\n{detail}\nPagamento por PIX ou cartão. Se preferir, envio o QR ou o link direto.",
-        )
-        return {"ok": True}
-
-    # 6) Fallback conforme fluxo
-    if flow == "pix_pending":
-        msg = f"Detectei um PIX pendente de '{product_name}'. Quer que eu reenvie o QR/link agora?"
-    else:
-        msg = f"Posso te ajudar a concluir '{product_name}'. Prefere link direto ou quer tirar alguma dúvida primeiro?"
-    await zapi_send_text(phone, msg)
-    return {"ok": True}
+    # classificar e rotear
+    intent = detect_intent(text)
+    ctx["last_intent"] = intent
+    store_ctx(phone, ctx)
+    return await handle_intent(phone, ctx, text, intent)
 
 # Evita 404 da Z-API para pings de status
 @app.post("/webhook/zapi/status")
