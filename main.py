@@ -254,9 +254,27 @@ def matches(text: str, pats) -> bool:
 
 def extract_phone_and_text(body: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
     """
-    Tenta extrair (phone, text) de diferentes formatos enviados pela Z-API.
+    Normaliza vários formatos da Z-API:
+      - { "phone": "...", "text": "..." }
+      - { "phone": "...", "text": {"message": "..."} }
+      - { "message": {"phone": "...", "text": "..."} }
+      - { "data": {"message": {"from": "...", "text": "..."} } }
     """
-    # formato direto
+    def as_text(x: Any) -> Optional[str]:
+        if x is None:
+            return None
+        if isinstance(x, str):
+            return x
+        if isinstance(x, dict):
+            # chaves mais comuns
+            for k in ("message", "text", "body", "caption"):
+                v = x.get(k)
+                if isinstance(v, str):
+                    return v
+        # último recurso: não forçar dict/list em string
+        return None
+
+    # direto
     phone = body.get("phone") or body.get("from")
     text  = body.get("text")  or body.get("body")
 
@@ -275,7 +293,10 @@ def extract_phone_and_text(body: Dict[str, Any]) -> Tuple[Optional[str], Optiona
             phone = phone or m2.get("phone") or m2.get("from")
             text  = text  or m2.get("text")  or m2.get("body")
 
-    return normalize_phone(phone), (text or "").strip() if text else None
+    # caso especial: text veio como dict (ex.: {"message": "oi"})
+    text = as_text(text)
+
+    return normalize_phone(phone), (text.strip() if isinstance(text, str) else None)
 
 @app.post("/webhook/zapi")
 async def zapi_webhook(
