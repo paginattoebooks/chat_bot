@@ -24,6 +24,13 @@ log = logging.getLogger("paginatto")
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Iara")
 BRAND_NAME     = os.getenv("BRAND_NAME", "Paginatto")
 
+# Site institucional (pedido do cliente)
+SITE_URL = os.getenv("SITE_URL", "https://paginattoebooks.github.io/Paginatto.site.com.br/").strip()
+
+# Dados legais (para mensagens de segurança/confiança)
+LEGAL_NAME = os.getenv("LEGAL_NAME", "PAGINATTO").strip()
+LEGAL_CNPJ = os.getenv("LEGAL_CNPJ", "57.941.903/0001-94").strip()
+
 # Z-API
 ZAPI_INSTANCE  = (os.getenv("ZAPI_INSTANCE") or "").strip()
 ZAPI_TOKEN     = (os.getenv("ZAPI_TOKEN") or "").strip()
@@ -213,6 +220,12 @@ STOP_PATTERNS   = [
     r"n[aã]o quero (conversar|falar)", r"n[aã]o me (chame|incomode|envie|mande)"
 ]
 
+# Palavras-chave para segurança/confiança
+TRUST_PATTERNS = [
+    r"\bseguro\b", r"\bseguran[cç]a\b", r"\bgolpe\b", r"\bfraude\b",
+    r"\bscam\b", r"\bfake\b", r"\bfalso\b", r"\bconfi[aá]vel\b", r"\bconfian[cç]a\b",
+]
+
 INTENTS: Dict[str, List[str]] = {
     "greeting": [r"\b(oi|ol[aá]|eai|boa\s+noite|boa\s+tarde|bom\s+dia)\b"],
     "thanks":   [r"\bobrigad[oa]\b", r"\bvaleu\b"],
@@ -230,6 +243,7 @@ INTENTS: Dict[str, List[str]] = {
     "product_info": [r"como\s+funciona", r"o\s+que\s+[ée]", r"conte[úu]do", r"do\s+que\s+se\s+trata"],
     "email_missing": [r"n[aã]o\s+(recebi|chegou).*(email|e-?mail|link)", r"cad[êe]\s+o\s+(email|e-?mail|link)"],
     "resend":   [r"\b(reenvia|reenviar|enviar\s+de\s+novo|manda\s+de\s+novo|mandar\s+novamente)\b"],
+    "trust":    TRUST_PATTERNS,  # segurança/confiança
 }
 
 def matches(text: str, pats: List[str]) -> bool:
@@ -386,13 +400,26 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
         await zapi_send_text(phone, "Obrigada pela compra! 🎉 Qualquer dúvida, estamos à disposição por aqui.")
         return {"ok": True}
 
+    # -------- SEGURANÇA / CONFIANÇA --------
+    if intent == "trust":
+        msg = (
+            f"Pode ficar tranquilo(a)! Somos a *{LEGAL_NAME}* (CNPJ **{LEGAL_CNPJ}**), operação regular e produto **100% digital (PDF)**.\n"
+            f"A entrega é garantida no seu e-mail após a aprovação (posso enviar por aqui também). "
+            f"Se quiser conferir, este é o nosso site: {SITE_URL}\n"
+            f"Qualquer dúvida que você tiver, pode me falar. 🙂"
+        )
+        await zapi_send_text(phone, msg)
+        ctx["asked"] = None
+        store_ctx(phone, ctx)
+        return {"ok": True}
+
     # entrega (produto digital)
     if intent == "shipping":
         await zapi_send_text(
             phone,
             "Nosso produto é **100% digital (PDF/e-book)** — não existe frete, rastreio ou envio físico.\n"
             "Assim que o pagamento é aprovado, você recebe o **link de download** no e-mail cadastrado "
-            "e, se preferir, posso enviar o link por aqui também. Quer que eu envie por aqui?"
+            f"e, se preferir, posso enviar aqui também. Você pode conferir nosso site: {SITE_URL}"
         )
         ctx["asked"] = "resend_link"
         store_ctx(phone, ctx)
@@ -422,16 +449,14 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
         store_ctx(phone, ctx)
         return {"ok": True}
 
-    # link direto
+    # link direto / intenção de compra
     if intent == "link":
-        # escolhe link de acordo com produto/estágio
-        link = checkout_url
-        if product_key:
-            if product_key == "tabib" and stage == "tabib_menu" and ctx.get("tabib_bundle"):
-                link = get_checkout_link("tabib", bundle=True, fallback=checkout_url)
-            else:
-                link = get_checkout_link(product_key, bundle=False, fallback=checkout_url)
-        await zapi_send_text(phone, f"Perfeito, {name}. Segue seu link para concluir: {link}")
+        # Pedido do cliente: enviar o link do SITE e a mensagem de confiança
+        await zapi_send_text(
+            phone,
+            f"Perfeito, {name}. Você pode comprar pelo nosso site: {SITE_URL}\n"
+            "Você pode conferir no nosso site e qualquer dúvida que você tiver, você pode me falar. 😉"
+        )
         store_ctx(phone, ctx)
         return {"ok": True}
 
@@ -441,7 +466,7 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
         await zapi_send_text(
             phone,
             f"O *{base or 'produto'}* é um material digital (PDF) com conteúdo prático para aplicar hoje mesmo. "
-            "Se quiser, te envio um resumo e o link para concluir quando for melhor para você."
+            f"Se quiser, te envio um resumo e você pode conferir também no site: {SITE_URL}"
         )
         store_ctx(phone, ctx)
         return {"ok": True}
@@ -481,27 +506,34 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
     asked = ctx.get("asked")
     if intent == "yes":
         if asked == "confirm_desist":
-            # cliente disse que desistiu -> oferta
             pk = product_key or detect_product_key(product_name) or ""
             headline, detail = build_offer_ext(pk or "tabib", bundle=False)
-            link = get_checkout_link(pk or "tabib", bundle=False, fallback=ctx.get("checkout_url",""))
-            await zapi_send_text(phone, f"{headline}\n{detail}\n\nSeu carrinho: {link}\nPosso aplicar agora e finalizar com você?")
+            await zapi_send_text(
+                phone,
+                f"{headline}\n{detail}\n\n"
+                f"Se preferir, você pode comprar direto pelo nosso site: {SITE_URL}\n"
+                "Qualquer dúvida, me chama aqui. 😉"
+            )
             ctx["asked"] = "apply_offer"
             store_ctx(phone, ctx)
             return {"ok": True}
         if asked == "apply_offer":
-            # reenvia link
-            pk = product_key or detect_product_key(product_name) or ""
-            link = get_checkout_link(pk or "tabib", bundle=bool(ctx.get("tabib_bundle")), fallback=ctx.get("checkout_url",""))
-            await zapi_send_text(phone, f"Perfeito! Aqui está o link atualizado para concluir: {link}")
+            # Pedido do cliente: usar o SITE para compra
+            await zapi_send_text(
+                phone,
+                f"Perfeito! Você pode finalizar pelo nosso site: {SITE_URL}\n"
+                "Você pode conferir no nosso site e qualquer dúvida que você tiver, você pode me falar."
+            )
             ctx["asked"] = None
             set_checkout_stage(ctx)
             store_ctx(phone, ctx)
             return {"ok": True}
         if asked == "resend_link":
-            pk = product_key or detect_product_key(product_name) or ""
-            link = get_checkout_link(pk or "tabib", bundle=bool(ctx.get("tabib_bundle")), fallback=ctx.get("checkout_url",""))
-            await zapi_send_text(phone, f"Aqui está: {link}\nSe preferir, posso te acompanhar até a confirmação. 🙂")
+            await zapi_send_text(
+                phone,
+                f"Aqui está o nosso site para acessar o conteúdo: {SITE_URL}\n"
+                "Se preferir, posso te acompanhar por aqui até dar tudo certo. 🙂"
+            )
             ctx["asked"] = None
             store_ctx(phone, ctx)
             return {"ok": True}
@@ -518,7 +550,11 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
         msg = f"Detectei um PIX pendente do *{product_name or PRODUCTS.get(product_key,{}).get('name','produto')}*. Quer que eu reenvie o QR/link agora?"
     else:
         base = product_name or PRODUCTS.get(product_key, {}).get("name", "produto")
-        msg = f"Posso te ajudar a concluir *{base}*. Prefere link direto ou quer tirar alguma dúvida primeiro?"
+        msg = (
+            f"Posso te ajudar a concluir *{base}*. "
+            f"Se quiser, já pode conferir e comprar pelo nosso site: {SITE_URL}\n"
+            "Ou me diga qual dúvida você tem. 🙂"
+        )
     await zapi_send_text(phone, msg)
     store_ctx(phone, ctx)
     return {"ok": True}
@@ -532,21 +568,19 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
     stage = ctx.get("stage") or "verify"
     tlow  = text.lower()
 
-    # ===== CHECKOUT: trata expiração, compra, parar, reenvio, dúvidas =====
+    # ===== CHECKOUT =====
     if stage == "checkout":
         if offer_expired(ctx):
             await zapi_send_text(phone, "A condição anterior expirou. Posso **renovar** a oferta e te mandar o link atualizado?")
             ctx["asked"] = "apply_offer"
             store_ctx(phone, ctx)
             return {"ok": True}
-        # deixa o handler global cuidar do restante
         return await handle_intent(phone, ctx, text, detect_intent(text))
 
-    # ===== VERIFY: confirmar se é o dono do número =====
+    # ===== VERIFY =====
     if stage == "verify":
         if is_option(tlow, "1", "sim", "sou eu", "isso mesmo", "eu"):
             ctx["confirmed_owner"] = True
-            # Se já temos um produto vindo do webhook, seguimos direto
             pk = ctx.get("product_key") or ""
             if pk == "tabib":
                 ctx["stage"] = "tabib_menu"
@@ -560,10 +594,13 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
                 return {"ok": True}
             elif pk in ("airfryer", "masterchef"):
                 headline, detail = build_offer_ext(pk, bundle=False)
-                link = get_checkout_link(pk, bundle=False, fallback=ctx.get("checkout_url",""))
                 set_checkout_stage(ctx)
                 store_ctx(phone, ctx)
-                await zapi_send_text(phone, f"{headline}\n{detail}\n\nLink para concluir: {link}")
+                await zapi_send_text(
+                    phone,
+                    f"{headline}\n{detail}\n\n"
+                    f"Se quiser, já pode conferir e comprar pelo nosso site: {SITE_URL}"
+                )
                 return {"ok": True}
             else:
                 ctx["stage"] = "pick_product"
@@ -576,10 +613,9 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
             clear_ctx(phone)
             return {"ok": True}
 
-        # não entendeu -> tenta intenções globais (stop, shipping, etc.)
         return await handle_intent(phone, ctx, text, detect_intent(text))
 
-    # ===== PICK_PRODUCT: escolher 1/2/3 ou por palavra =====
+    # ===== PICK_PRODUCT =====
     if stage == "pick_product":
         choice = None
         if is_option(tlow, "1") or "airfryer" in tlow:
@@ -605,31 +641,43 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
             )
             return {"ok": True}
 
-        # Airfryer / MasterChef -> oferta direta
+        # Airfryer / MasterChef -> apresenta oferta e direciona ao site
         headline, detail = build_offer_ext(choice, bundle=False)
-        link = get_checkout_link(choice, bundle=False, fallback=ctx.get("checkout_url",""))
         set_checkout_stage(ctx)
         store_ctx(phone, ctx)
-        await zapi_send_text(phone, f"{headline}\n{detail}\n\nLink para concluir: {link}")
+        await zapi_send_text(
+            phone,
+            f"{headline}\n{detail}\n\n"
+            f"Para finalizar com segurança, acesse nosso site: {SITE_URL}\n"
+            "Qualquer dúvida que você tiver, você pode me falar."
+        )
         return {"ok": True}
 
-    # ===== TABIB_MENU: bundle 19,90, unitários ou voltar =====
+    # ===== TABIB_MENU =====
     if stage == "tabib_menu":
         if is_option(tlow, "1"):
             ctx["tabib_bundle"] = True
             headline, detail = build_offer_ext("tabib", bundle=True)
-            link = get_checkout_link("tabib", bundle=True, fallback=ctx.get("checkout_url",""))
             set_checkout_stage(ctx)
             store_ctx(phone, ctx)
-            await zapi_send_text(phone, f"{headline}\n{detail}\n\nLink para concluir: {link}")
+            await zapi_send_text(
+                phone,
+                f"{headline}\n{detail}\n\n"
+                f"Para concluir com segurança, acesse: {SITE_URL}\n"
+                "Se quiser, eu te acompanho por aqui."
+            )
             return {"ok": True}
         if is_option(tlow, "2"):
             ctx["tabib_bundle"] = False
             headline, detail = build_offer_ext("tabib", bundle=False)
-            link = get_checkout_link("tabib", bundle=False, fallback=ctx.get("checkout_url",""))
             set_checkout_stage(ctx)
             store_ctx(phone, ctx)
-            await zapi_send_text(phone, f"{headline}\n{detail}\n\nOpções unitárias aqui: {link}")
+            await zapi_send_text(
+                phone,
+                f"{headline}\n{detail}\n\n"
+                f"As opções unitárias estão no nosso site: {SITE_URL}\n"
+                "Qualquer dúvida, me chama."
+            )
             return {"ok": True}
         if is_option(tlow, "3", "voltar"):
             ctx["stage"] = "pick_product"
@@ -637,7 +685,6 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
             await zapi_send_text(phone, "Certo! Qual produto você quer?\n1) Airfryer  2) Tabib  3) MasterChef")
             return {"ok": True}
 
-        # qualquer outra coisa -> deixa intenções globais tentarem
         return await handle_intent(phone, ctx, text, detect_intent(text))
 
     # fallback se stage desconhecido
@@ -717,7 +764,6 @@ async def zapi_webhook(
             await zapi_send_text(phone, f"Você desistiu da compra de '{base}'? 1) Sim  2) Não")
             return {"ok": True}
         else:
-            # ainda não confirmou — manter conversa aberta sem loop
             await zapi_send_text(phone, f"Sou {ASSISTANT_NAME} da {BRAND_NAME}. Posso te ajudar a finalizar o pedido?")
             return {"ok": True}
 
@@ -730,5 +776,3 @@ async def zapi_webhook(
 @app.post("/webhook/zapi/status")
 async def zapi_status():
     return {"ok": True}
-
-
