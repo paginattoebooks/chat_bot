@@ -14,6 +14,8 @@ from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from offer_rules import build_offer
+from fastapi import Header
+from starlette.responses import JSONResponse
 
 # -------------------- Bootstrap (.env, log) --------------------
 load_dotenv()  # garante leitura local
@@ -151,45 +153,85 @@ Exemplo de payload (ajuste conforme sua loja):
 }
 """
 
-@app.post("/webhook/cartpanda")
-async def cartpanda_webhook(
+@app.post("/webhook/zapi")
+async def zapi_webhook(
     request: Request,
-    x_cartpanda_secret: Optional[str] = Header(None)
+    x_zapi_secret: Optional[str] = Header(None)
 ):
-    if CARTPANDA_WEBHOOK_SECRET and x_cartpanda_secret != CARTPANDA_WEBHOOK_SECRET:
-        raise HTTPException(status_code=401, detail="invalid secret")
+    # Durante os testes, não devolva 401 (gera 500 no lado deles).
+    if ZAPI_WEBHOOK_SECRET and x_zapi_secret != ZAPI_WEBHOOK_SECRET:
+        log.warning("Z-API secret inválido (ignorando em teste).")
+        return {"ok": True, "note": "invalid secret (ignored in test)"}
 
-    payload = await request.json()
-    log.info("CartPanda payload: %s", payload)
+    # Parse super-defensivo
+    body: Dict[str, Any] = {}
+    ctype = (request.headers.get("content-type") or "").lower()
+    try:
+        if "application/json" in ctype:
+            body = await request.json()
+        elif "application/x-www-form-urlencoded" in ctype or "multipart/form-data" in ctype:
+            form = await request.form()
+            body = {}
+            for k, v in form.items():
+                # Converte message[phone] → {"message": {"phone": "..."}}
+                if k.startswith("message[") and k.endswith("]"):
+                    key = k[8:-1]
+                    body.setdefault("message", {})[key] = str(v)
+                else:
+                    body[k] = str(v)
+        else:
+            raw = (await request.body()).decode("utf-8", "ignore")
+            log.warning("Z-API inbound (raw/unknown ctype): %s", raw)
+            return {"ok": True}
+    except Exception as e:
+        raw = (await request.body()).decode("utf-8", "ignore")
+        log.warning("Z-API inbound (parse fail): %s | err=%s", raw, e)
+        return {"ok": True}
 
-    event = (payload.get("event") or "").strip().lower()
-    cust  = payload.get("customer") or {}
-    prod  = payload.get("product") or {}
-    order = payload.get("order") or {}
+    log.info("Z-API inbound body: %s", body)
 
-    phone = normalize_phone(cust.get("phone"))
-    name  = (cust.get("name") or "").strip()
-    product_name = (prod.get("name") or "").strip()
-    checkout_url = (prod.get("checkout_url") or "").strip()
+    phone, text = extract_phone_and_text(body)
+    if not phone or not text:
+        return {"ok": True, "note": "missing phone/text"}
 
-    if not phone or not product_name:
-        return JSONResponse({"ok": False, "reason": "missing phone or product"}, status_code=200)
+    ctx = read_ctx(phone)
+    if not ctx:
+        await zapi_send_text(phone, f"Oi, aqui é {ASSISTANT_NAME} da {BRAND_NAME}. Como posso ajudar?")
+        return {"ok": True}
 
-    flow = "abandoned" if event == "checkout_abandoned" else "pix_pending" if event == "pix_pending" else "unknown"
-    ctx = {
-        "flow": flow,
-        "name": name,
-        "product_name": product_name,
-        "checkout_url": checkout_url,
-        "order": order,
-        "created_at": datetime.utcnow().isoformat(),
-    }
-    store_ctx(phone, ctx, minutes=180)
+    name         = ctx.get("name") or ""
+    product_name = ctx.get("product_name") or ""
+    checkout_url = ctx.get("checkout_url") or ""
+    flow         = ctx.get("flow") or "unknown"
 
-    first = f"Oi, esse número é de {name}? Sou {ASSISTANT_NAME} da {BRAND_NAME}."
-    await zapi_send_text(phone, first)
+    if matches(text, YES_PATTERNS) or text.lower() in {"sou eu", "isso mesmo", "eu"}:
+        await zapi_send_text(phone, f"Você desistiu da compra de '{product_name}'?")
+        return {"ok": True}
 
-    return {"ok": True, "flow": flow}
+    if matches(text, BOUGHT_PATTERNS):
+        clear_ctx(phone)
+        await zapi_send_text(phone, "Obrigada pela compra. Qualquer dúvida, a equipe Paginatto está à disposição.")
+        return {"ok": True}
+
+    if matches(text, QUIT_PATTERNS):
+        headline, detail = build_offer(product_name)
+        await zapi_send_text(phone, f"{headline}\n{detail}\n\nSeu carrinho: {checkout_url}\nPosso aplicar agora e finalizar com você?")
+        return {"ok": True}
+
+    if any(k in text.lower() for k in ["quero retomar","quero comprar","manda o link","pode aplicar","vamos fechar"]):
+        await zapi_send_text(phone, f"Perfeito, {name}. Segue seu link para concluir: {checkout_url}")
+        return {"ok": True}
+
+    if any(k in text.lower() for k in ["qual o preço","valor","tem desconto","até quando","formas de pagamento","pix","cartão","cartao"]):
+        headline, detail = build_offer(product_name)
+        await zapi_send_text(phone, f"{headline}\n{detail}\nPagamento por PIX ou cartão. Se preferir, envio o QR ou o link direto.")
+        return {"ok": True}
+
+    msg = (f"Detectei um PIX pendente de '{product_name}'. Quer que eu reenvie o QR/link agora?"
+           if flow == "pix_pending"
+           else f"Posso te ajudar a concluir '{product_name}'. Prefere link direto ou quer tirar alguma dúvida primeiro?")
+    await zapi_send_text(phone, msg)
+    return {"ok": True}
 
 # -------------------- Z-API inbound webhook (mensagens recebidas) --------------------
 """
