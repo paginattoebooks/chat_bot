@@ -243,8 +243,15 @@ async def zapi_webhook(
     if ZAPI_WEBHOOK_SECRET and x_zapi_secret != ZAPI_WEBHOOK_SECRET:
         raise HTTPException(status_code=401, detail="invalid secret")
 
-    body = await request.json()
-    log.info("Z-API inbound: %s", body)
+    # <- antes era: body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        # pode ter vindo texto, form-data ou vazio; não quebre o webhook
+        raw = (await request.body()).decode("utf-8", "ignore")
+        log.warning("Z-API inbound (não-JSON): %s", raw)
+        return {"ok": True}   # sempre 200 para a Z-API não marcar como erro
+
 
     phone, text = extract_phone_and_text(body)
     if not phone or not text:
