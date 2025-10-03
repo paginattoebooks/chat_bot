@@ -59,7 +59,7 @@ except Exception:
     rds = None
 
 # -------------------- App --------------------
-app = FastAPI(title="Paginatto Bot", version="2.0.0")
+app = FastAPI(title="Paginatto Bot", version="2.1.0")
 
 # -------------------- Helpers (tempo/estado) --------------------
 _MEM: Dict[str, Tuple[datetime, str]] = {}  # fallback em memória
@@ -353,6 +353,27 @@ def find_tabib_choice_by_number(num: str) -> Optional[Dict[str, Any]]:
         return CatalogBySKU[sku]
     return None
 
+# -------------------- Helpers (produto/oferta) --------------------
+def detect_product_key(text: str) -> Optional[str]:
+    """Detecta família por palavras-chave rápidas."""
+    t = (text or "").lower()
+    if "tabib" in t or re.search(r"\bv[1-4]\b|\bvolume\s*[1-4]\b", t):
+        return "tabib"
+    if "airfryer" in t or "fritadeira" in t:
+        return "airfryer"
+    if "masterchef" in t or "master chef" in t:
+        return "masterchef"
+    return None
+
+def build_offer_ext(product_or_key: str, *, bundle: bool = False) -> Tuple[str, str]:
+    """Compat: aceita 'tabib'/'airfryer'/'masterchef' ou nome completo."""
+    name_map = {"tabib": "Tabib", "airfryer": "300 receitas para AirFryer", "masterchef": "MasterChef"}
+    base_name = name_map.get(product_or_key.lower(), product_or_key)
+    headline, detail = build_offer(base_name)
+    if product_or_key.lower() == "tabib" and bundle:
+        detail = f"Todos os e-books do Tabib de R$ 49,90 por **R$ 19,90** hoje.\n{detail}"
+    return headline, detail
+
 # -------------------- Helpers (oferta/estágio) --------------------
 def set_checkout_stage(ctx: Dict[str, Any], *, minutes: int = OFFER_TTL_MIN) -> None:
     ctx["stage"] = "checkout"
@@ -487,6 +508,23 @@ def extract_phone_and_text(body: Dict[str, Any]) -> Tuple[Optional[str], Optiona
     text = as_text(text)
     return normalize_phone(phone), (text.strip() if isinstance(text, str) else None)
 
+# ------------ Detectar áudio/ligação ------------
+def is_audio_or_call(body: Dict[str, Any]) -> bool:
+    def _typ(d: Dict[str, Any]) -> str:
+        return (d.get("type") or d.get("messageType") or "").lower()
+
+    if _typ(body) in {"audio", "voice", "ptt", "call", "call_log"}:
+        return True
+
+    m = body.get("message") or {}
+    if isinstance(m, dict) and (_typ(m) in {"audio", "voice", "ptt", "call"}):
+        return True
+
+    if isinstance(m, dict) and any(k in m for k in ("audio", "voice", "ptt")):
+        return True
+
+    return False
+
 # -------------------- Health & Root --------------------
 @app.get("/health")
 async def health():
@@ -579,35 +617,33 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
     flow           = ctx.get("flow") or "unknown"
     stage          = ctx.get("stage") or "verify"
 
-if intent == "unknown":
-    await zapi_send_text(phone, "nao entendi, pode me dizer novamente")
-    store_ctx(phone, ctx)
-    return {"ok": True}
+    # ---- detectar produto mencionado a qualquer momento ----
+    pk_from_text = detect_product_key(text or "")
+    if pk_from_text:
+        ctx["selected_product"] = pk_from_text
+        ctx["product_key"] = pk_from_text
 
-# detectar produto mencionado a qualquer momento
-pk_from_text = detect_product_key(text or "")
-if pk_from_text:
-    ctx["selected_product"] = pk_from_text
-    if pk_from_text == "tabib":
-        ctx["stage"] = "tabib_menu"
-        ctx["tabib_bundle"] = False
-        store_ctx(phone, ctx)
-        await zapi_send_text(
-            phone,
-            "Perfeito! Para o Tabib, prefere:\n1) **Todos** os e-books por 19,90\n2) Ver **unitários**\n3) Voltar"
-        )
-        return {"ok": True}
-    else:
-        headline, detail = build_offer_ext(pk_from_text, bundle=False)
-        set_checkout_stage(ctx)
-        store_ctx(phone, ctx)
-        await zapi_send_text(
-            phone,
-            f"{headline}\n{detail}\n\n"
-            f"Se quiser, já pode conferir e comprar pelo nosso site: {SITE_URL}"
-        )
-        return {"ok": True}
-
+        if pk_from_text == "tabib":
+            ctx["stage"] = "tabib_menu"
+            ctx["tabib_bundle"] = False
+            store_ctx(phone, ctx)
+            await zapi_send_text(
+                phone,
+                "Perfeito! Para o Tabib, prefere:\n"
+                "1) **Todos** os e-books por 19,90\n"
+                "2) Ver **unitários**\n"
+                "3) Voltar"
+            )
+            return {"ok": True}
+        else:
+            headline, detail = build_offer_ext(pk_from_text, bundle=False)
+            set_checkout_stage(ctx)
+            store_ctx(phone, ctx)
+            await zapi_send_text(
+                phone,
+                f"{headline}\n{detail}\n\nPara finalizar com segurança, acesse nosso site: {SITE_URL}"
+            )
+            return {"ok": True}
 
     # opt-out / parar
     if intent in ("stop", "quit"):
@@ -715,46 +751,11 @@ if pk_from_text:
         store_ctx(phone, ctx)
         return {"ok": True}
 
-    # confirmação contextual (yes/no)
-    asked = ctx.get("asked")
-    if intent == "yes":
-        if asked == "confirm_desist":
-            headline, detail = build_offer(product_name or "seu produto")
-            await zapi_send_text(
-                phone,
-                f"{headline}\n{detail}\n\n"
-                f"Se preferir, você pode comprar direto pelo nosso site: {SITE_URL}\n"
-                "Qualquer dúvida, me chama aqui. 😉"
-            )
-            ctx["asked"] = "apply_offer"
-            store_ctx(phone, ctx)
-            return {"ok": True}
-        if asked == "apply_offer":
-            await zapi_send_text(
-                phone,
-                f"Perfeito! Você pode finalizar pelo nosso site: {SITE_URL}\n"
-                "Você pode conferir no nosso site e qualquer dúvida que você tiver, você pode me falar."
-            )
-            ctx["asked"] = None
-            set_checkout_stage(ctx)
-            store_ctx(phone, ctx)
-            return {"ok": True}
-        if asked == "resend_link":
-            await zapi_send_text(
-                phone,
-                f"Aqui está o nosso site para acessar o conteúdo: {SITE_URL}\n"
-                "Se preferir, posso te acompanhar por aqui até dar tudo certo. 🙂"
-            )
-            ctx["asked"] = None
-            store_ctx(phone, ctx)
-            return {"ok": True}
-
-    if intent == "no":
-        if asked in ("confirm_desist", "apply_offer", "resend_link"):
-            await zapi_send_text(phone, "Sem problemas! Se surgir qualquer dúvida, estou por aqui. 😉")
-            ctx["asked"] = None
-            store_ctx(phone, ctx)
-            return {"ok": True}
+    # "não entendi"
+    if intent == "unknown":
+        await zapi_send_text(phone, "Não entendi, pode me dizer novamente?")
+        store_ctx(phone, ctx)
+        return {"ok": True}
 
     # fallback por fluxo
     if flow == "pix_pending":
@@ -776,32 +777,36 @@ def is_option(text: str, *options: str) -> bool:
 
 async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, Any]:
     stage = ctx.get("stage") or "verify"
-    tlow  = text.lower()
+    tlow  = (text or "").lower()
 
     # se o cliente nomear o produto em qualquer fase, priorize isso
-pk_from_text = detect_product_key(text or "")
-if pk_from_text:
-    ctx["selected_product"] = pk_from_text
-    if pk_from_text == "tabib":
-        ctx["stage"] = "tabib_menu"
-        ctx["tabib_bundle"] = False
-        store_ctx(phone, ctx)
-        await zapi_send_text(
-            phone,
-            "Perfeito! Para o Tabib, prefere:\n1) **Todos** os e-books por 19,90\n2) Ver **unitários**\n3) Voltar"
-        )
-        return {"ok": True}
-    else:
-        headline, detail = build_offer_ext(pk_from_text, bundle=False)
-        set_checkout_stage(ctx)
-        store_ctx(phone, ctx)
-        await zapi_send_text(
-            phone,
-            f"{headline}\n{detail}\n\n"
-            f"Para finalizar com segurança, acesse nosso site: {SITE_URL}\n"
-            "Qualquer dúvida que você tiver, você pode me falar."
-        )
-        return {"ok": True}
+    pk_from_text = detect_product_key(text or "")
+    if pk_from_text:
+        ctx["selected_product"] = pk_from_text
+        ctx["product_key"] = pk_from_text
+        if pk_from_text == "tabib":
+            ctx["stage"] = "tabib_menu"
+            ctx["tabib_bundle"] = False
+            store_ctx(phone, ctx)
+            await zapi_send_text(
+                phone,
+                "Perfeito! Para o Tabib, prefere:\n"
+                "1) **Todos** os e-books por 19,90\n"
+                "2) Ver **unitários**\n"
+                "3) Voltar"
+            )
+            return {"ok": True}
+        else:
+            headline, detail = build_offer_ext(pk_from_text, bundle=False)
+            set_checkout_stage(ctx)
+            store_ctx(phone, ctx)
+            await zapi_send_text(
+                phone,
+                f"{headline}\n{detail}\n\n"
+                f"Para finalizar com segurança, acesse nosso site: {SITE_URL}\n"
+                "Qualquer dúvida que você tiver, você pode me falar."
+            )
+            return {"ok": True}
 
     # ===== CHECKOUT =====
     if stage == "checkout":
@@ -946,6 +951,13 @@ async def zapi_webhook(
     log.info("Z-API inbound body: %s", body)
 
     phone, text = extract_phone_and_text(body)
+
+    # áudio/ligação não suportados
+    if is_audio_or_call(body):
+        if phone:
+            await zapi_send_text(phone, "No momento não conseguimos ouvir áudio e nem atender ligações. Pode escrever por aqui?")
+        return {"ok": True}
+
     if not phone or not text:
         return {"ok": True, "note": "missing phone/text"}
 
@@ -993,3 +1005,4 @@ async def zapi_webhook(
 @app.post("/webhook/zapi/status")
 async def zapi_status():
     return {"ok": True}
+
