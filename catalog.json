@@ -1,0 +1,136 @@
+[
+  {
+    "sku": "TABIB_V1",
+    "family": "tabib",
+    "type": "volume",
+    "volume": 1,
+    "name": "Tabib Volume 1: Tratamento de Dores e Inflamações",
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-1.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919679:1",
+    "description": "Guia para combater dores de cabeça, musculares e articulares, além de inflamações crônicas.",
+    "aliases": ["tabib 1","tabib1","v1","vol 1","volume 1","inflamacoes","inflamações","tratamento de dores","dores","dor","inflamação","inflamacao"],
+    "tags": ["tabib","dores","inflamação","inflamações"]
+  },
+  {
+    "sku": "TABIB_V2",
+    "family": "tabib",
+    "type": "volume",
+    "volume": 2,
+    "name": "Tabib Volume 2: Saúde Respiratória e Imunidade",
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-2.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919682:1",
+    "description": "Focado na saúde respiratória e fortalecimento da imunidade.",
+    "aliases": ["tabib 2","tabib2","v2","vol 2","volume 2","respiratoria","respiratória","pulmão","pulmao","imunidade","gripe","resfriado"],
+    "tags": ["tabib","respiração","pulmão","imunidade"]
+  },
+  {
+    "sku": "TABIB_V3",
+    "family": "tabib",
+    "type": "volume",
+    "volume": 3,
+    "name": "Tabib Volume 3: Saúde Digestiva e Metabólica",
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-3.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919686:1",
+    "description": "Receitas para equilíbrio digestivo e regulação do metabolismo.",
+    "aliases": ["tabib 3","tabib3","v3","vol 3","volume 3","digestiva","metabólica","metabolica","intestino","refluxo","azia"],
+    "tags": ["tabib","digestão","intestino","metabolismo"]
+  },
+  {
+    "sku": "TABIB_V4",
+    "family": "tabib",
+    "type": "volume",
+    "volume": 4,
+    "name": "Tabib Volume 4: Saúde Mental e Energética",
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-4.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919701:1",
+    "description": "Bem-estar emocional, redução do estresse e aumento da energia.",
+    "aliases": ["tabib 4","tabib4","v4","vol 4","volume 4","saude mental","saúde mental","energia","estresse","ansiedade","sono"],
+    "tags": ["tabib","humor","ansiedade","energia","sono"]
+  },
+  {
+    "sku": "TABIB_FULL",
+    "family": "tabib",
+    "type": "bundle",
+    "name": "Tabib completo",
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-completo.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/184229277:1",
+    "description": "Coletânea com todos os volumes Tabib.",
+    "aliases": ["tabib completo","colecao tabib","coleção tabib","bundle tabib","todos os volumes"],
+    "tags": ["tabib","bundle","coleção"]
+  },
+  {
+    "sku": "TABIB_24_25_BUNDLE",
+    "family": "tabib",
+    "type": "bundle",
+    "name": "Tabib 2025 + Bônus 19,90 + Tabib 2024",
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-2025-bonus-2024.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/184229263:1",
+    "description": "Pacote com as edições 2025 e 2024 (mais de 960 receitas).",
+    "aliases": ["tabib 2025","tabib 2024","tabib pacote","tabib combo","tabib 960 receitas","tabib todos por 19,90","tabib 19,90"],
+    "tags": ["tabib","bundle","2025","2024","promo"]
+  },
+  {
+    "sku": "ANTIDOTO",
+    "family": "antidoto",
+    "type": "standalone",
+    "name": "Antídoto - Antídotos indígenas",
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/antidoto.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919637:1",
+    "description": "Receitas inspiradas em saberes indígenas para antídotos naturais.",
+    "aliases": ["antidoto","antídoto","o livro antidoto","antidotos indigenas","antídotos indígenas"],
+    "tags": ["antídoto","indígena","natural"]
+  },
+  {
+    "sku": "KURIMA",
+    "family": "kurima",
+    "type": "standalone",
+    "name": "Kurimã - Óleos essenciais",
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/kurima.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919661:1",
+    "description": "Guia prático de óleos essenciais com receitas e usos seguros.",
+    "aliases": ["kurima","oleos essenciais","óleos essenciais","oleo essencial"],
+    "tags": ["óleos essenciais","aromaterapia"]
+  },
+  {
+    "sku": "BALSAMO",
+    "family": "balsamo",
+    "type": "standalone",
+    "name": "Bálsamo - Pomadas naturais",
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/balsamo.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919668:1",
+    "description": "Fórmulas de pomadas naturais para dores, feridas e inflamações.",
+    "aliases": ["balsamo","pomadas naturais","pomada natural"],
+    "tags": ["pomadas","natural","dores"]
+  },
+  {
+    "sku": "PRESSAO_ALTA_PLAN",
+    "family": "pressao",
+    "type": "standalone",
+    "name": "Tratamento Natural Personalizado para Pressão Alta",
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/pressao-alta.png",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/174502432:1",
+    "description": "Plano individualizado com alimentação, ervas e exercícios.",
+    "aliases": ["pressao alta","hipertensao","tratamento personalizado","hipertensão"],
+    "tags": ["pressão alta","plano","saúde cardiovascular"]
+  },
+  {
+    "sku": "Airfryer do Chef PREMIUM",
+    "family": "airfryer",
+    "type": "standalone",
+    "name": "Airfryer do Chef PREMIUM",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/198180560:1",
+    "description": "Este guia reúne receitas rápidas e variadas — de lanches a refeições completas — todas pensadas para reduzir calorias sem abrir mão do sabor"
+    "aliases": ["airfryer","receitas airfryer","300 receitas","300 receitas para airfryer"],
+    "tags": ["airfryer","receitas"]
+  },
+  {
+    "sku": "Doces sem açúcar",
+    "family": "doces sem açúcar, airfryer",
+    "type": "standalone",
+    "name": "Doces sem açúcar - MAIS DE 110 RECEITAS",
+    "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/198181424:1",
+    "description": "Prepare bolos, mousses, tortas e guloseimas usando adoçantes naturais e combinações equilibradas, ideais para diabéticos, dietas de emagrecimento ou para quem busca uma vida mais saudável sem abrir mão do sabor.",
+    "aliases": ["airfryer","receitas airfryer","Doces sem açúcar","300 receitas para airfryer","doces","sem açúcar"],
+    "tags": ["airfryer","receitas","sem açúcar","doces"]
+  }
+]
