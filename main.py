@@ -235,6 +235,7 @@ INTENTS: Dict[str, List[str]] = {
         r"\b(rastreio|rastreamento|c[oó]digo\s+de\s+rastreio|correios|sedex)\b",
         r"\b(endere[cç]o|resid[eê]ncia|receber\s+em\s+casa|envio\s+f[ií]sico)\b",
     ],
+    "security": [r"\bgolpe(s)?\b",r"\bfraude(s)?\b",r"\bscam\b",r"\bseguran[çc]a\b", r"\bsegur[oa]\b",r"\bconfi[aá]vel\b",r"\bconfian[çc]a\b",
     "payment":  [r"\bpix\b", r"\bcart[aã]o\b", r"\bcr[eé]dito\b", r"\bdebito\b", r"\bparcel", r"forma(s)? de pagamento", r"\bboleto\b"],
     "price":    [r"\b(pre[cç]o|valor|quanto\s+custa|qnto)\b"],
     "discount": [r"\b(desconto|cupom|promo[cç][aã]o|oferta)\b"],
@@ -405,7 +406,6 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
         msg = (
             f"Pode ficar tranquilo(a)! Somos a *{LEGAL_NAME}* (CNPJ **{LEGAL_CNPJ}**), operação regular e produto **100% digital (PDF)**.\n"
             f"A entrega é garantida no seu e-mail após a aprovação (posso enviar por aqui também). "
-            f"Se quiser conferir, este é o nosso site: {SITE_URL}\n"
             f"Qualquer dúvida que você tiver, pode me falar. 🙂"
         )
         await zapi_send_text(phone, msg)
@@ -413,13 +413,25 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
         store_ctx(phone, ctx)
         return {"ok": True}
 
+   if intent == "security":
+    msg = (
+        "Entendo sua preocupação. A *PAGINATTO* é uma empresa real (CNPJ **57.941.903/0001-94**). "
+        "Você pode consultar nosso CNPJ. Não temos reclamações no Reclame Aqui. "
+        "Garantimos **100%** a entrega digital do seu e-book por e-mail. \n\n"
+        "Posso seguir com o seu pedido?"
+    )
+    await zapi_send_text(phone, msg)
+    store_ctx(phone, ctx)
+    return {"ok": True}
+ 
+
     # entrega (produto digital)
     if intent == "shipping":
         await zapi_send_text(
             phone,
             "Nosso produto é **100% digital (PDF/e-book)** — não existe frete, rastreio ou envio físico.\n"
             "Assim que o pagamento é aprovado, você recebe o **link de download** no e-mail cadastrado "
-            f"e, se preferir, posso enviar aqui também. Você pode conferir nosso site: {SITE_URL}"
+            f"e, se preferir, posso enviar aqui também."
         )
         ctx["asked"] = "resend_link"
         store_ctx(phone, ctx)
