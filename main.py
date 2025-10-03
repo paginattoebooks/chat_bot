@@ -215,7 +215,7 @@ def _load_catalog() -> List[Dict[str, Any]]:
         "family": "tabib"
       },
       {
-        "sku": "TABIB_KIDS",
+        "sku": "TABIB_KIDS,kids, criança,neto",
         "name": "Tabib Kids : Tratamento exclusivo para crianças",
         "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/198003903:1",
         "image": "..\\Paginatto\\imagens\\TABIB KIDS.png",
@@ -224,7 +224,7 @@ def _load_catalog() -> List[Dict[str, Any]]:
         "family": "tabib"
        },
       {
-        "sku": "ANTIDOTO",
+        "sku": "ANTIDOTO,antídoto",
         "name": "Antídoto - Antídotos indígenas",
         "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919637:1",
         "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/antidoto.png",
@@ -233,7 +233,7 @@ def _load_catalog() -> List[Dict[str, Any]]:
         "family": "outros"
       },
       {
-        "sku": "KURIMA",
+        "sku": "KURIMA,kurimã",
         "name": "Kurimã - Óleos essenciais",
         "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919661:1",
         "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/kurima.png",
@@ -242,7 +242,7 @@ def _load_catalog() -> List[Dict[str, Any]]:
         "family": "outros"
       },
       {
-        "sku": "BALSAMO",
+        "sku": "BALSAMO,bálsamo,balsamo",
         "name": "Bálsamo - Pomadas naturais",
         "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919668:1",
         "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/balsamo.png",
@@ -251,16 +251,7 @@ def _load_catalog() -> List[Dict[str, Any]]:
         "family": "outros"
       },
       {
-        "sku": "PRESSAO_ALTA_PLAN",
-        "name": "Tratamento Natural Personalizado para Pressão Alta",
-        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/174502432:1",
-        "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/pressao-alta.png",
-        "aliases": ["pressao alta","hipertensao","tratamento personalizado"],
-        "description": "Plano individualizado com alimentação, ervas e exercícios.",
-        "family": "outros"
-      },
-      {
-        "sku": "AIRFRYER_PREMIUM",
+        "sku": "AIRFRYER_PREMIUM,air fryer, air frair",
         "name": "Airfryer do Chef PREMIUM - 14,90",
         "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/198180560:1",
         "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/airfryer-300.png",
@@ -342,7 +333,7 @@ def find_by_text(text: str) -> List[Dict[str, Any]]:
 
 def menu_tabib_text() -> str:
     vols = []
-    for v in ["TABIB_V1","TABIB_V2","TABIB_V3","TABIB_V4"]:
+    for v in ["TABIB_V1","TABIB_V2","TABIB_V3","TABIB_V4, TABIB_KIDS"]:
         if v in CatalogBySKU:
             vols.append(CatalogBySKU[v]["name"])
     opt5 = None
@@ -363,7 +354,7 @@ def menu_tabib_text() -> str:
 
 def tabib_unitarios_list_text() -> str:
     vols, idx = [], 1
-    for sku in ["TABIB_V1","TABIB_V2","TABIB_V3","TABIB_V4"]:
+    for sku in ["TABIB_V1","TABIB_V2","TABIB_V3","TABIB_V4,"TABIB_KIDS"]:
         if sku in CatalogBySKU:
             vols.append(f"{idx}) {CatalogBySKU[sku]['name']}")
             idx += 1
@@ -388,7 +379,8 @@ def find_tabib_choice_by_number(num: str) -> Optional[Dict[str, Any]]:
         2: "TABIB_V2",
         3: "TABIB_V3",
         4: "TABIB_V4",
-        5: "TABIB_24_25_BUNDLE" if "TABIB_24_25_BUNDLE" in CatalogBySKU else "TABIB_FULL"
+        5: "TABIB_24_25_BUNDLE" if "TABIB_24_25_BUNDLE" in CatalogBySKU else "TABIB_FULL",
+        6: "TABIB_KIDS"
     }
     sku = mapping.get(i)
     if sku and sku in CatalogBySKU:
