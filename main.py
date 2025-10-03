@@ -336,6 +336,30 @@ def menu_tabib_text() -> str:
     footer = "\nResponda com o número (1–5) ou diga, por ex., 'v3' / 'volume 3'."
     return header + "\n".join(lines) + footer
 
+def tabib_unitarios_list_text() -> str:
+    vols, idx = [], 1
+    for sku in ["TABIB_V1","TABIB_V2","TABIB_V3","TABIB_V4"]:
+        if sku in CatalogBySKU:
+            vols.append(f"{idx}) {CatalogBySKU[sku]['name']}")
+            idx += 1
+    if not vols:
+        return "Ainda não tenho os volumes unitários cadastrados."
+    txt = "Esses são os *volumes unitários* do Tabib:\n" + "\n".join(vols)
+    txt += "\n\nResponda com o número (ex.: 2) ou com o volume (ex.: v2)."
+    return txt
+
+def describe_item(it: Dict[str, Any]) -> str:
+    name = it.get("name","")
+    desc = it.get("description","")
+    return f"*{name}*\n{desc}"
+
+def pick_family_item(fam: str) -> Optional[Dict[str, Any]]:
+    fam = (fam or "").lower()
+    if fam == "airfryer" and "AIRFRYER_300" in CatalogBySKU:
+        return CatalogBySKU["AIRFRYER_300"]
+    skus = FamilyIndex.get(fam) or []
+    return CatalogBySKU.get(skus[0]) if skus else None
+
 def find_tabib_choice_by_number(num: str) -> Optional[Dict[str, Any]]:
     m = re.fullmatch(r"[1-5]", num)
     if not m:
@@ -368,9 +392,9 @@ def detect_product_key(text: str) -> Optional[str]:
 def build_offer_ext(product_or_key: str, *, bundle: bool = False) -> Tuple[str, str]:
     """Compat: aceita 'tabib'/'airfryer'/'masterchef' ou nome completo."""
     name_map = {"tabib": "Tabib", "airfryer": "300 receitas para AirFryer", "masterchef": "MasterChef"}
-    base_name = name_map.get(product_or_key.lower(), product_or_key)
+    base_name = name_map.get(str(product_or_key).lower(), product_or_key)
     headline, detail = build_offer(base_name)
-    if product_or_key.lower() == "tabib" and bundle:
+    if str(product_or_key).lower() == "tabib" and bundle:
         detail = f"Todos os e-books do Tabib de R$ 49,90 por **R$ 19,90** hoje.\n{detail}"
     return headline, detail
 
@@ -617,7 +641,28 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
     flow           = ctx.get("flow") or "unknown"
     stage          = ctx.get("stage") or "verify"
 
-    # ---- detectar produto mencionado a qualquer momento ----
+    # 0) Primeiro tenta casar um item específico do catálogo (ex.: "tabib v1")
+    items = find_by_text(text)
+    if items:
+        it = items[0]
+        # Tabib volume específico → descrição e pergunta "todos x unitários"
+        if it.get("family") == "tabib" and it.get("sku","").startswith("TABIB_V"):
+            msg = describe_item(it) + "\n\nQuer ver *todos* por 19,90 ou *unitários*?"
+            await zapi_send_text(phone, msg)
+            ctx["stage"] = "tabib_menu"
+            ctx["tabib_bundle"] = False
+            ctx["asked"] = "tabib_after_desc"
+            store_ctx(phone, ctx)
+            return {"ok": True}
+        # Outros itens → oferta + checkout
+        headline, detail = build_offer(it.get("name",""))
+        link = it.get("checkout") or ctx.get("checkout_url","")
+        set_checkout_stage(ctx)
+        store_ctx(phone, ctx)
+        await zapi_send_text(phone, f"{headline}\n{detail}\n\nLink para concluir: {link}")
+        return {"ok": True}
+
+    # ---- detectar produto mencionado a qualquer momento (família) ----
     pk_from_text = detect_product_key(text or "")
     if pk_from_text:
         ctx["selected_product"] = pk_from_text
@@ -636,13 +681,16 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
             )
             return {"ok": True}
         else:
-            headline, detail = build_offer_ext(pk_from_text, bundle=False)
-            set_checkout_stage(ctx)
-            store_ctx(phone, ctx)
-            await zapi_send_text(
-                phone,
-                f"{headline}\n{detail}\n\nPara finalizar com segurança, acesse nosso site: {SITE_URL}"
-            )
+            it = pick_family_item(pk_from_text)
+            if it:
+                headline, detail = build_offer(it.get("name",""))
+                link = it.get("checkout") or ctx.get("checkout_url","")
+                set_checkout_stage(ctx)
+                store_ctx(phone, ctx)
+                await zapi_send_text(phone, f"{headline}\n{detail}\n\nLink para concluir: {link}")
+            else:
+                headline, detail = build_offer_ext(pk_from_text, bundle=False)
+                await zapi_send_text(phone, f"{headline}\n{detail}\n\nAcesse: {SITE_URL}")
             return {"ok": True}
 
     # opt-out / parar
@@ -797,16 +845,19 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
             )
             return {"ok": True}
         else:
-            headline, detail = build_offer_ext(pk_from_text, bundle=False)
-            set_checkout_stage(ctx)
-            store_ctx(phone, ctx)
-            await zapi_send_text(
-                phone,
-                f"{headline}\n{detail}\n\n"
-                f"Para finalizar com segurança, acesse nosso site: {SITE_URL}\n"
-                "Qualquer dúvida que você tiver, você pode me falar."
-            )
-            return {"ok": True}
+            it = pick_family_item(pk_from_text)
+            if it:
+                headline, detail = build_offer(it.get("name",""))
+                link = it.get("checkout") or ctx.get("checkout_url","")
+                set_checkout_stage(ctx)
+                store_ctx(phone, ctx)
+                await zapi_send_text(
+                    phone,
+                    f"{headline}\n{detail}\n\n"
+                    f"Para finalizar com segurança, acesse: {link}\n"
+                    "Qualquer dúvida que você tiver, você pode me falar."
+                )
+                return {"ok": True}
 
     # ===== CHECKOUT =====
     if stage == "checkout":
@@ -872,6 +923,24 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
 
     # ===== TABIB_MENU =====
     if stage == "tabib_menu":
+        # fluxo após descrição (todos x unitários)
+        asked = ctx.get("asked") or ""
+        if asked == "tabib_after_desc":
+            if re.search(r"\b(todos|bundle|pacote|19[,\.]?90)\b", tlow):
+                it = CatalogBySKU.get("TABIB_24_25_BUNDLE") or CatalogBySKU.get("TABIB_FULL")
+                if it:
+                    headline, detail = build_offer(it.get("name","Tabib"))
+                    link = it.get("checkout") or ctx.get("checkout_url","")
+                    set_checkout_stage(ctx); store_ctx(phone, ctx)
+                    await zapi_send_text(phone, f"{headline}\n{detail}\n\nLink para concluir: {link}")
+                    return {"ok": True}
+            if re.search(r"\bunit[aá]rio", tlow) or tlow in {"2","unitarios","unitários"}:
+                ctx["asked"] = "tabib_pick_unit"; store_ctx(phone, ctx)
+                await zapi_send_text(phone, tabib_unitarios_list_text())
+                return {"ok": True}
+            await zapi_send_text(phone, "Não entendi, prefere *todos* por 19,90 ou ver *unitários*?")
+            return {"ok": True}
+
         # número direto 1–5
         if re.fullmatch(r"[1-5]", tlow):
             it = find_tabib_choice_by_number(tlow)
@@ -895,17 +964,13 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
         items = find_by_text(text)
         if items:
             it = items[0]
-            headline, detail = build_offer(it.get("name","Tabib"))
-            link = it.get("checkout") or ctx.get("checkout_url","")
-            set_checkout_stage(ctx)
-            store_ctx(phone, ctx)
-            await zapi_send_text(
-                phone,
-                f"{headline}\n{detail}\n\n"
-                f"Link para concluir: {link}\n"
-                f"Você pode conferir no nosso site: {SITE_URL}"
-            )
-            return {"ok": True}
+            if it.get("family") == "tabib":
+                msg = describe_item(it)
+                headline, detail = build_offer(it.get("name","Tabib"))
+                link = it.get("checkout") or ctx.get("checkout_url","")
+                set_checkout_stage(ctx); store_ctx(phone, ctx)
+                await zapi_send_text(phone, f"{msg}\n\n{headline}\n{detail}\n\nLink para concluir: {link}")
+                return {"ok": True}
 
         await zapi_send_text(phone, "Não peguei sua escolha. Responda 1–5 ou diga o volume desejado (ex.: v3, volume 3).")
         return {"ok": True}
@@ -1005,4 +1070,6 @@ async def zapi_webhook(
 @app.post("/webhook/zapi/status")
 async def zapi_status():
     return {"ok": True}
+
+
 
