@@ -13,6 +13,7 @@ import httpx
 from unidecode import unidecode
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
+from webhook import router as webhook_router
 from dotenv import load_dotenv
 from offer_rules import build_offer
 
@@ -37,6 +38,8 @@ ZAPI_INSTANCE  = (os.getenv("ZAPI_INSTANCE") or "").strip()
 ZAPI_TOKEN     = (os.getenv("ZAPI_TOKEN") or "").strip()
 CLIENT_TOKEN   = (os.getenv("ZAPI_CLIENT_TOKEN") or os.getenv("ZAPI_TOKEN") or "").strip()
 ZAPI_BASE      = (os.getenv("ZAPI_BASE") or "").strip()
+APP = FastAPI()
+APP.include_router(webhook_router, prefix="/webhooks"
 
 if ZAPI_BASE:
     ZAPI_MSG_URL = ZAPI_BASE.rstrip("/")
