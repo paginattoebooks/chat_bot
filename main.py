@@ -8,6 +8,8 @@ Stack: FastAPI + Z-API + (Redis opcional)
 import os, re, json, logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple, List
+import psycopg
+from psycopg_pool import ConnectionPool
 
 import httpx
 from unidecode import unidecode
@@ -25,6 +27,8 @@ log = logging.getLogger("paginatto")
 # -------------------- Config --------------------
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Iara")
 BRAND_NAME     = os.getenv("BRAND_NAME", "Paginatto")
+DATABASE_URL = os.environ["DATABASE_URL"]
+pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=5, timeout=10)
 
 # Site institucional (pedido do cliente)
 SITE_URL  = os.getenv("SITE_URL", "https://paginattoebooks.github.io/Paginatto.site.com.br/").strip()
@@ -143,6 +147,11 @@ def _infer_family(item: Dict[str, Any]) -> str:
     if "airfryer" in name: return "airfryer"
     if "masterchef" in name or "master chef" in name: return "masterchef"
     return "outros"
+    
+def ping_db():
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("select 1")
+        return cur.fetchone()[0]
 
 def _safe_tokens(text: str) -> List[str]:
     return re.findall(r"[a-z0-9]+", (text or "").lower(), flags=re.UNICODE)
