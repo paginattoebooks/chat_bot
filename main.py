@@ -38,8 +38,8 @@ ZAPI_INSTANCE  = (os.getenv("ZAPI_INSTANCE") or "").strip()
 ZAPI_TOKEN     = (os.getenv("ZAPI_TOKEN") or "").strip()
 CLIENT_TOKEN   = (os.getenv("ZAPI_CLIENT_TOKEN") or os.getenv("ZAPI_TOKEN") or "").strip()
 ZAPI_BASE      = (os.getenv("ZAPI_BASE") or "").strip()
-APP = FastAPI()
-APP.include_router(webhook_router, prefix="/webhook"
+app = FastAPI(title="Paginatto Bot")
+app.include_router(webhook_router, prefix="/webhook")
 
 if ZAPI_BASE:
     ZAPI_MSG_URL = ZAPI_BASE.rstrip("/")
@@ -592,8 +592,8 @@ def is_audio_or_call(body: Dict[str, Any]) -> bool:
 
 # -------------------- Health & Root --------------------
 @app.get("/health")
-async def health():
-    return {"ok": True, "ts": datetime.utcnow().isoformat()}
+def health():
+    return {"ok": True}
 
 # ---------------- Webhook CartPanda ----------------
 """
