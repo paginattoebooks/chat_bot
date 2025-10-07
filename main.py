@@ -39,7 +39,7 @@ ZAPI_TOKEN     = (os.getenv("ZAPI_TOKEN") or "").strip()
 CLIENT_TOKEN   = (os.getenv("ZAPI_CLIENT_TOKEN") or os.getenv("ZAPI_TOKEN") or "").strip()
 ZAPI_BASE      = (os.getenv("ZAPI_BASE") or "").strip()
 APP = FastAPI()
-APP.include_router(webhook_router, prefix="/webhooks"
+APP.include_router(webhook_router, prefix="/webhook"
 
 if ZAPI_BASE:
     ZAPI_MSG_URL = ZAPI_BASE.rstrip("/")
