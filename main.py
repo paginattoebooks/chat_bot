@@ -357,7 +357,7 @@ def menu_tabib_text() -> str:
 
 def tabib_unitarios_list_text() -> str:
     vols, idx = [], 1
-    for sku in ["TABIB_V1","TABIB_V2","TABIB_V3","TABIB_V4,"TABIB_KIDS"]:
+    for sku in ["TABIB_V1", "TABIB_V2", "TABIB_V3", "TABIB_V4", "TABIB_KIDS"]:
         if sku in CatalogBySKU:
             vols.append(f"{idx}) {CatalogBySKU[sku]['name']}")
             idx += 1
