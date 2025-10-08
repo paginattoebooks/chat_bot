@@ -12,12 +12,15 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple, List
 
+import logging
 import httpx
 from unidecode import unidecode
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
+from urllib.parse import quote_plus
 from psycopg_pool import ConnectionPool
+
 
 from webhook import router as webhook_router
 from offer_rules import build_offer
@@ -26,6 +29,11 @@ from offer_rules import build_offer
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("paginatto")
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if DATABASE_URL:
+    dsn = DATABASE_URL
 
 # -------------------- App (UMA vez) --------------------
 app = FastAPI(title="Paginatto Bot", version="2.2.0")
@@ -68,24 +76,24 @@ except Exception:
     rds = None
 
 # -------------------- Banco (pool no app.state) --------------------
-# Variáveis OBRIGATÓRIAS no Render → Environment
-DB_HOST = os.environ["DB_HOST"]
-DB_USER = os.environ["DB_USER"]
-DB_PASSWORD = os.environ["DB_PASSWORD"]
-DSN = os.environ["DATABASE_URL"]
+else:
+    # fallback (usa conexão DIRETA, porta 5432)
+    DB_HOST = os.environ["DB_HOST"]
+    DB_USER = os.environ["DB_USER"]
+    DB_PASSWORD = os.environ["DB_PASSWORD"]
+    DB_NAME = os.environ.get("DB_NAME", "postgres")
+    DB_PORT = os.environ.get("DB_PORT", "5432")         # <= 5432, não 6543
+    DB_SSLMODE = os.environ.get("DB_SSLMODE", "require")
+    dsn = (
+        f"postgresql://{DB_USER}:{quote_plus(DB_PASSWORD)}@"
+        f"{DB_HOST}:{DB_PORT}/{DB_NAME}?sslmode={DB_SSLMODE}"
+    )
 
-# Opcionais (com padrão)
-DB_PORT = os.environ.get("DB_PORT", "6543")      # 5432 = Direct, 6543 = Session Pooler
-DB_NAME = os.environ.get("DB_NAME", "postgres")
-DB_SSLMODE = os.environ.get("DB_SSLMODE", "require")  # use 'require' (sem aspas extras)
+# log sem senha, só pra conferir host/porta
+safe = dsn.replace(DB_PASSWORD, "********") if not DATABASE_URL else dsn
+log.info("Usando DSN: %s", safe)
 
-DSN = (
-    f"host='{DB_HOST}' port='{DB_PORT}' dbname='{DB_NAME}' "
-    f"user='{DB_USER}' password='{DB_PASSWORD}' sslmode='{DB_SSLMODE}'"
-)
-
-def create_pool() -> ConnectionPool:
-    return ConnectionPool(DSN, min_size=1, max_size=2, kwargs={"connect_timeout":5})
+pool = ConnectionPool(dsn, min_size=1, max_size=2, kwargs={"connect_timeout": 5})
 
 # cria o pool no startup e fecha no shutdown
 @app.on_event("startup")
