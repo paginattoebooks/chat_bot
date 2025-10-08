@@ -27,8 +27,23 @@ log = logging.getLogger("paginatto")
 # -------------------- Config --------------------
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Iara")
 BRAND_NAME     = os.getenv("BRAND_NAME", "Paginatto")
-DATABASE_URL = os.environ["DATABASE_URL"]
-pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=5, timeout=10)
+DB_HOST = os.environ["DB_HOST"]
+DB_PORT = os.environ.get("DB_PORT", "6543")
+DB_USER = os.environ["DB_USER"]
+DB_PASSWORD = os.environ["DB_PASSWORD"]
+DB_NAME = os.environ.get("DB_NAME", "postgres")
+DB_SSLMODE = os.environ.get("DB_SSLMODE", "require")
+
+DSN = (
+    f"host={DB_HOST} "
+    f"port={DB_PORT} "
+    f"dbname={DB_NAME} "
+    f"user={DB_USER} "
+    f"password={DB_PASSWORD} "
+    f"sslmode={DB_SSLMODE}"
+)
+
+pool = ConnectionPool(DSN, min_size=1, max_size=5, timeout=10)
 
 # Site institucional (pedido do cliente)
 SITE_URL  = os.getenv("SITE_URL", "https://paginattoebooks.github.io/Paginatto.site.com.br/").strip()
