@@ -6,27 +6,35 @@ Stack: FastAPI + Z-API + (Redis opcional)
 
 # -------------------- Imports --------------------
 import os
+import re
+import json
 import logging
-from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, Tuple, List
 
-from webhook import router as webhook_router 
-from fastapi import APIRouter, Request
-from offer_rules import build_offer                
+import httpx
+from unidecode import unidecode
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 
+from webhook import router as webhook_router
+from offer_rules import build_offer
 
 # -------------------- Bootstrap (.env, log) --------------------
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("paginatto")
 
+# -------------------- App (UMA vez) --------------------
+app = FastAPI(title="Paginatto Bot", version="2.2.0")
+
 # -------------------- Config de marca/assistente --------------------
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Iara").strip()
 BRAND_NAME     = os.getenv("BRAND_NAME", "Paginatto").strip()
 
-SITE_URL  = os.getenv("SITE_URL", "https://paginattoebooks.github.io/Paginatto.site.com.br/").strip()
+SITE_URL   = os.getenv("SITE_URL", "https://paginattoebooks.github.io/Paginatto.site.com.br/").strip()
 LEGAL_NAME = os.getenv("LEGAL_NAME", "PAGINATTO").strip()
 LEGAL_CNPJ = os.getenv("LEGAL_CNPJ", "57.941.903/0001-94").strip()
 
@@ -58,7 +66,8 @@ try:
     rds = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
 except Exception:
     rds = None
-# -------------------- Banco (pool embutido no main) --------------------
+
+# -------------------- Banco (pool no app.state) --------------------
 # Variáveis OBRIGATÓRIAS no Render → Environment
 DB_HOST = os.environ["DB_HOST"]
 DB_USER = os.environ["DB_USER"]
@@ -67,17 +76,17 @@ DB_PASSWORD = os.environ["DB_PASSWORD"]
 # Opcionais (com padrão)
 DB_PORT = os.environ.get("DB_PORT", "6543")      # 5432 = Direct, 6543 = Session Pooler
 DB_NAME = os.environ.get("DB_NAME", "postgres")
-DB_SSLMODE = os.environ.get("DB_SSLMODE", "require")  # use 'require'
+DB_SSLMODE = os.environ.get("DB_SSLMODE", "require")  # use 'require' (sem aspas extras)
 
 DSN = (
     f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} "
     f"user={DB_USER} password={DB_PASSWORD} sslmode={DB_SSLMODE}"
 )
 
-# Criado aqui e guardado em app.state.pool
 def create_pool() -> ConnectionPool:
     return ConnectionPool(DSN, min_size=1, max_size=5, timeout=10)
-    # cria o pool no startup e fecha no shutdown
+
+# cria o pool no startup e fecha no shutdown
 @app.on_event("startup")
 def _startup():
     app.state.pool = create_pool()
@@ -90,8 +99,8 @@ def _shutdown():
         log.info("Pool de conexões fechado.")
     except Exception:
         pass
-        
-@router.get("/ping")
+
+@app.get("/ping")
 def ping(request: Request):
     pool = request.app.state.pool
     with pool.connection() as conn:
@@ -100,10 +109,7 @@ def ping(request: Request):
             cur.fetchone()
     return {"ok": True}
 
-# -------------------- App --------------------
-app = FastAPI(title="Paginatto Bot")
-
-# Saúde/diagnóstico simples
+# -------------------- Saúde/diagnóstico simples --------------------
 @app.get("/health")
 def health():
     return {
@@ -114,19 +120,13 @@ def health():
         "redis": bool(rds),
     }
 
-# Inclui rotas do webhook (handlers usam o pool exposto em db.py)
-app.include_router(webhook_router, prefix="/webhook")
-
 # -------------------- Exceções globais (opcional) --------------------
 @app.exception_handler(Exception)
 async def on_any_error(_, exc: Exception):
     log.exception("Erro não tratado")
     return JSONResponse(status_code=500, content={"ok": False, "error": "internal_error"})
 
-# -------------------- App --------------------
-app = FastAPI(title="Paginatto Bot", version="2.2.0")
-
-# -------------------- Helpers (tempo/estado) --------------------
+# -------------------- Estado (Redis/memória) --------------------
 _MEM: Dict[str, Tuple[datetime, str]] = {}  # fallback em memória
 
 def now_utc() -> datetime:
@@ -204,13 +204,6 @@ def _infer_family(item: Dict[str, Any]) -> str:
     if "airfryer" in name: return "airfryer"
     if "masterchef" in name or "master chef" in name: return "masterchef"
     return "outros"
-    
-def ping_db():
-    with app.state.pool.connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1")
-            return cur.fetchone()[0]
-
 
 def _safe_tokens(text: str) -> List[str]:
     return re.findall(r"[a-z0-9]+", (text or "").lower(), flags=re.UNICODE)
@@ -404,7 +397,7 @@ def find_by_text(text: str) -> List[Dict[str, Any]]:
 
 def menu_tabib_text() -> str:
     vols = []
-    for v in ["TABIB_V1","TABIB_V2","TABIB_V3","TABIB_V4, TABIB_KIDS"]:
+    for v in ["TABIB_V1","TABIB_V2","TABIB_V3","TABIB_V4","TABIB_KIDS"]:
         if v in CatalogBySKU:
             vols.append(CatalogBySKU[v]["name"])
     opt5 = None
@@ -580,7 +573,7 @@ def normalize_text(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-def matches(text: str, patterns: list[str]) -> bool:
+def matches(text: str, patterns: List[str]) -> bool:
     """Usa o texto normalizado para casar os regex declarados em INTENTS."""
     t = normalize_text(text)
     return any(re.search(p, t) for p in patterns)
@@ -658,12 +651,7 @@ def is_audio_or_call(body: Dict[str, Any]) -> bool:
         return True
     return False
 
-# -------------------- Health & Root --------------------
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-# ---------------- Webhook CartPanda ----------------
+# -------------------- Webhook CartPanda ----------------
 """
 Esperado: CartPanda envia um webhook quando:
 - checkout_abandoned
@@ -1251,3 +1239,6 @@ async def zapi_webhook(
 @app.post("/webhook/zapi/status")
 async def zapi_status():
     return {"ok": True}
+
+# Inclui rotas do webhook (banco/cartpanda persist)
+app.include_router(webhook_router, prefix="/webhook")
