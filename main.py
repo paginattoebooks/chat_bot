@@ -79,8 +79,8 @@ DB_NAME = os.environ.get("DB_NAME", "postgres")
 DB_SSLMODE = os.environ.get("DB_SSLMODE", "require")  # use 'require' (sem aspas extras)
 
 DSN = (
-    f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} "
-    f"user={DB_USER} password={DB_PASSWORD} sslmode={DB_SSLMODE}"
+    f"host='{DB_HOST}' port='{DB_PORT}' dbname='{DB_NAME}' "
+    f"user='{DB_USER}' password='{DB_PASSWORD}' sslmode='{DB_SSLMODE}'"
 )
 
 def create_pool() -> ConnectionPool:
