@@ -11,9 +11,11 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from webhook import router as webhook_router        # usa o pool do db.py
-from offer_rules import build_offer                 # mantido para compat
-# Se você usa Redis em handlers, ele é importado e criado mais abaixo
+from webhook import router as webhook_router 
+from fastapi import APIRouter, Request
+from offer_rules import build_offer                
+from psycopg_pool import ConnectionPool
+
 
 # -------------------- Bootstrap (.env, log) --------------------
 load_dotenv()
@@ -75,6 +77,29 @@ DSN = (
 # Criado aqui e guardado em app.state.pool
 def create_pool() -> ConnectionPool:
     return ConnectionPool(DSN, min_size=1, max_size=5, timeout=10)
+    # cria o pool no startup e fecha no shutdown
+@app.on_event("startup")
+def _startup():
+    app.state.pool = create_pool()
+    log.info("Pool de conexões criado.")
+
+@app.on_event("shutdown")
+def _shutdown():
+    try:
+        app.state.pool.close()
+        log.info("Pool de conexões fechado.")
+    except Exception:
+        pass
+        
+@router.get("/ping")
+def ping(request: Request):
+    pool = request.app.state.pool
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+    return {"ok": True}
+
 # -------------------- App --------------------
 app = FastAPI(title="Paginatto Bot")
 
@@ -181,9 +206,10 @@ def _infer_family(item: Dict[str, Any]) -> str:
     return "outros"
     
 def ping_db():
-    with pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("select 1")
-        return cur.fetchone()[0]
+    with app.state.pool.connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1")
+          return cur.fetchone()[0]
+
 
 def _safe_tokens(text: str) -> List[str]:
     return re.findall(r"[a-z0-9]+", (text or "").lower(), flags=re.UNICODE)
