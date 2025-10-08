@@ -118,14 +118,15 @@
     "family": "airfryer",
     "type": "standalone",
     "name": "Airfryer do Chef PREMIUM",
+    "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/airfryer-300.png",
     "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/198180560:1",
-    "description": "Este guia reúne receitas rápidas e variadas — de lanches a refeições completas — todas pensadas para reduzir calorias sem abrir mão do sabor"
+    "description": "Este guia reúne receitas rápidas e variadas — de lanches a refeições completas — todas pensadas para reduzir calorias sem abrir mão do sabor",
     "aliases": ["airfryer","receitas airfryer","300 receitas","300 receitas para airfryer"],
     "tags": ["airfryer","receitas"]
   },
   {
     "sku": "Doces sem açúcar",
-    "family": "doces sem açúcar, airfryer",
+    "family": "airfryer",
     "type": "standalone",
     "name": "Doces sem açúcar - MAIS DE 110 RECEITAS",
     "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/198181424:1",
