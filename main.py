@@ -206,9 +206,10 @@ def _infer_family(item: Dict[str, Any]) -> str:
     return "outros"
     
 def ping_db():
-    with app.state.pool.connection() as conn, conn.cursor() as cur:
-        cur.execute("SELECT 1")
-          return cur.fetchone()[0]
+    with app.state.pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            return cur.fetchone()[0]
 
 
 def _safe_tokens(text: str) -> List[str]:
