@@ -6,6 +6,7 @@ Stack: FastAPI + Z-API + (Redis opcional) + Postgres (Supabase)
 
 # -------------------- Imports --------------------
 import os
+import re
 import json
 import logging
 from datetime import datetime, timedelta
@@ -17,7 +18,7 @@ from unidecode import unidecode
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
-
+from psycopg_pool import ConnectionPool
 
 from webhook import router as webhook_router
 from offer_rules import build_offer
@@ -67,9 +68,6 @@ except Exception:
     rds = None
 
 # -------------------- DSN helpers --------------------
-from urllib.parse import quote_plus
-import re
-
 def build_dsn() -> str:
     """
     Conserta pooler->direto:
@@ -98,7 +96,7 @@ def create_pool() -> ConnectionPool:
     return ConnectionPool(dsn, min_size=1, max_size=2, kwargs={"connect_timeout": 5})
 
 # -------------------- Banco (pool no app.state) --------------------
-# NÃO crie o pool aqui. Crie no startup com create_pool() (definido acima).
+# NÃO crie o pool aqui. Crie no startup com create_pool().
 
 @app.on_event("startup")
 def _startup():
@@ -1183,4 +1181,3 @@ async def zapi_status():
 
 # -------------------- Outras rotas (persist/cartpanda) --------------------
 app.include_router(webhook_router, prefix="/webhook")
-
