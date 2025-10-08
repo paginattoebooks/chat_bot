@@ -6,7 +6,6 @@ Stack: FastAPI + Z-API + (Redis opcional) + Postgres (Supabase)
 
 # -------------------- Imports --------------------
 import os
-import re
 import json
 import logging
 from datetime import datetime, timedelta
@@ -18,7 +17,7 @@ from unidecode import unidecode
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
-from psycopg_pool import ConnectionPool
+
 
 from webhook import router as webhook_router
 from offer_rules import build_offer
@@ -67,35 +66,39 @@ try:
 except Exception:
     rds = None
 
-# -------------------- Banco de dados --------------------
+# -------------------- DSN helpers --------------------
+from urllib.parse import quote_plus
+import re
+
 def build_dsn() -> str:
     """
-    Constrói o DSN do Postgres. Se o usuário informar URL do *pooler* (porta 6543),
-    convertemos para a conexão direta (hostname *.aws.* e porta 5432).
+    Conserta pooler->direto:
+    aws-1-us-east-2.pooler.supabase.com:6543  ->  aws-1-us-east-2.supabase.com:5432
     """
-    def build_dsn() -> str:
     url = (os.getenv("DATABASE_URL") or "").strip()
     if url:
-        # Corrige pooler -> conexão direta
-        # Ex.: aws-1-us-east-2.pooler.supabase.com:6543  -> aws-1-us-east-2.supabase.com:5432
         if ".pooler." in url:
             url = url.replace(".pooler.", ".").replace(":6543", ":5432")
         safe = re.sub(r":([^:@/]+)@", r":********@", url)
         log.info("Usando DSN: %s", safe)
         return url
 
-    host = os.environ["DB_HOST"].replace(".pooler.", ".")  # idem ajuste
+    host = (os.environ["DB_HOST"]).replace(".pooler.", ".")
     user = os.environ["DB_USER"]
     pwd  = os.environ["DB_PASSWORD"]
     name = os.environ.get("DB_NAME", "postgres")
     port = os.environ.get("DB_PORT", "5432")
     sslm = os.environ.get("DB_SSLMODE", "require")
-    dsn = f"postgresql://{user}:{quote_plus(pwd)}@{host}:{port}/{name}?sslmode={sslm}"
+    dsn  = f"postgresql://{user}:{quote_plus(pwd)}@{host}:{port}/{name}?sslmode={sslm}"
     log.info("Usando DSN: %s", dsn.replace(quote_plus(pwd), "********"))
     return dsn
 
 def create_pool() -> ConnectionPool:
-    return ConnectionPool(conninfo=build_dsn(), min_size=1, max_size=5, kwargs={"connect_timeout": 5})
+    dsn = build_dsn()
+    return ConnectionPool(dsn, min_size=1, max_size=2, kwargs={"connect_timeout": 5})
+
+# -------------------- Banco (pool no app.state) --------------------
+# NÃO crie o pool aqui. Crie no startup com create_pool() (definido acima).
 
 @app.on_event("startup")
 def _startup():
