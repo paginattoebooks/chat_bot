@@ -5,81 +5,98 @@ Stack: FastAPI + Z-API + (Redis opcional)
 """
 
 # -------------------- Imports --------------------
-import os, re, json, logging
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, Tuple, List
-import psycopg
-from psycopg_pool import ConnectionPool
-
-import httpx
-from unidecode import unidecode
-from fastapi import FastAPI, Request, Header, HTTPException
-from fastapi.responses import JSONResponse
-from webhook import router as webhook_router
+import os
+import logging
 from dotenv import load_dotenv
-from offer_rules import build_offer
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+
+from webhook import router as webhook_router        # usa o pool do db.py
+from offer_rules import build_offer                 # mantido para compat
+# Se você usa Redis em handlers, ele é importado e criado mais abaixo
 
 # -------------------- Bootstrap (.env, log) --------------------
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("paginatto")
 
-# -------------------- Config --------------------
-ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Iara")
-BRAND_NAME     = os.getenv("BRAND_NAME", "Paginatto")
-DB_HOST = os.environ["DB_HOST"]
-DB_PORT = os.environ.get("DB_PORT", "6543")
-DB_USER = os.environ["DB_USER"]
-DB_PASSWORD = os.environ["DB_PASSWORD"]
-DB_NAME = os.environ.get("DB_NAME", "postgres")
-DB_SSLMODE = os.environ.get("DB_SSLMODE", "require")
+# -------------------- Config de marca/assistente --------------------
+ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Iara").strip()
+BRAND_NAME     = os.getenv("BRAND_NAME", "Paginatto").strip()
 
-DSN = (
-    f"host={DB_HOST} "
-    f"port={DB_PORT} "
-    f"dbname={DB_NAME} "
-    f"user={DB_USER} "
-    f"password={DB_PASSWORD} "
-    f"sslmode={DB_SSLMODE}"
-)
-
-pool = ConnectionPool(DSN, min_size=1, max_size=5, timeout=10)
-
-# Site institucional (pedido do cliente)
 SITE_URL  = os.getenv("SITE_URL", "https://paginattoebooks.github.io/Paginatto.site.com.br/").strip()
-
-# Dados legais (segurança/confiança)
 LEGAL_NAME = os.getenv("LEGAL_NAME", "PAGINATTO").strip()
 LEGAL_CNPJ = os.getenv("LEGAL_CNPJ", "57.941.903/0001-94").strip()
 
-# Z-API
-ZAPI_INSTANCE  = (os.getenv("ZAPI_INSTANCE") or "").strip()
-ZAPI_TOKEN     = (os.getenv("ZAPI_TOKEN") or "").strip()
-CLIENT_TOKEN   = (os.getenv("ZAPI_CLIENT_TOKEN") or os.getenv("ZAPI_TOKEN") or "").strip()
-ZAPI_BASE      = (os.getenv("ZAPI_BASE") or "").strip()
-app = FastAPI(title="Paginatto Bot")
-app.include_router(webhook_router, prefix="/webhook")
+# -------------------- Z-API --------------------
+ZAPI_INSTANCE = (os.getenv("ZAPI_INSTANCE") or "").strip()
+ZAPI_TOKEN    = (os.getenv("ZAPI_TOKEN") or "").strip()
+CLIENT_TOKEN  = (os.getenv("ZAPI_CLIENT_TOKEN") or os.getenv("ZAPI_TOKEN") or "").strip()
+ZAPI_BASE     = (os.getenv("ZAPI_BASE") or "").strip().rstrip("/")
 
 if ZAPI_BASE:
-    ZAPI_MSG_URL = ZAPI_BASE.rstrip("/")
-else:
-    # fallback para o endpoint testado via PowerShell (send-text)
+    ZAPI_MSG_URL = ZAPI_BASE
+elif ZAPI_INSTANCE and ZAPI_TOKEN:
+    # endpoint clássico de envio de texto
     ZAPI_MSG_URL = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}/send-text"
+else:
+    ZAPI_MSG_URL = ""  # permanece vazio; validação pode ocorrer no uso
 
-# Webhook secrets (opcionais)
+# -------------------- Webhook secrets (opcionais) --------------------
 CARTPANDA_WEBHOOK_SECRET = (os.getenv("CARTPANDA_WEBHOOK_SECRET") or "").strip()
 ZAPI_WEBHOOK_SECRET      = (os.getenv("ZAPI_WEBHOOK_SECRET") or "").strip()
 
-# Ofertas: TTL (min) para expirar link/condição
+# -------------------- Ofertas --------------------
 OFFER_TTL_MIN = int(os.getenv("OFFER_TTL_MIN", "60"))
 
-# Redis (opcional)
+# -------------------- Redis (opcional) --------------------
 REDIS_URL = (os.getenv("REDIS_URL") or "").strip()
 try:
     import redis  # type: ignore
     rds = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
 except Exception:
     rds = None
+# -------------------- Banco (pool embutido no main) --------------------
+# Variáveis OBRIGATÓRIAS no Render → Environment
+DB_HOST = os.environ["DB_HOST"]
+DB_USER = os.environ["DB_USER"]
+DB_PASSWORD = os.environ["DB_PASSWORD"]
+
+# Opcionais (com padrão)
+DB_PORT = os.environ.get("DB_PORT", "6543")      # 5432 = Direct, 6543 = Session Pooler
+DB_NAME = os.environ.get("DB_NAME", "postgres")
+DB_SSLMODE = os.environ.get("DB_SSLMODE", "require")  # use 'require'
+
+DSN = (
+    f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} "
+    f"user={DB_USER} password={DB_PASSWORD} sslmode={DB_SSLMODE}"
+)
+
+# Criado aqui e guardado em app.state.pool
+def create_pool() -> ConnectionPool:
+    return ConnectionPool(DSN, min_size=1, max_size=5, timeout=10)
+# -------------------- App --------------------
+app = FastAPI(title="Paginatto Bot")
+
+# Saúde/diagnóstico simples
+@app.get("/health")
+def health():
+    return {
+        "ok": True,
+        "brand": BRAND_NAME,
+        "assistant": ASSISTANT_NAME,
+        "zapi_configured": bool(ZAPI_MSG_URL),
+        "redis": bool(rds),
+    }
+
+# Inclui rotas do webhook (handlers usam o pool exposto em db.py)
+app.include_router(webhook_router, prefix="/webhook")
+
+# -------------------- Exceções globais (opcional) --------------------
+@app.exception_handler(Exception)
+async def on_any_error(_, exc: Exception):
+    log.exception("Erro não tratado")
+    return JSONResponse(status_code=500, content={"ok": False, "error": "internal_error"})
 
 # -------------------- App --------------------
 app = FastAPI(title="Paginatto Bot", version="2.2.0")
