@@ -72,6 +72,7 @@ except Exception:
 DB_HOST = os.environ["DB_HOST"]
 DB_USER = os.environ["DB_USER"]
 DB_PASSWORD = os.environ["DB_PASSWORD"]
+DSN = os.environ["DATABASE_URL"]
 
 # Opcionais (com padrão)
 DB_PORT = os.environ.get("DB_PORT", "6543")      # 5432 = Direct, 6543 = Session Pooler
@@ -84,7 +85,7 @@ DSN = (
 )
 
 def create_pool() -> ConnectionPool:
-    return ConnectionPool(DSN, min_size=1, max_size=5, timeout=10)
+    return ConnectionPool(DSN, min_size=1, max_size=2, kwargs={"connect_timeout":5})
 
 # cria o pool no startup e fecha no shutdown
 @app.on_event("startup")
