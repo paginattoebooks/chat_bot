@@ -1,7 +1,7 @@
 """
 Paginatto — Bot de WhatsApp
 Fluxos: Carrinho Abandonado e PIX Pendente
-Stack: FastAPI + Z-API + (Redis opcional)
+Stack: FastAPI + Z-API + (Redis opcional) + Postgres (Supabase)
 """
 
 # -------------------- Imports --------------------
@@ -11,16 +11,14 @@ import json
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple, List
+from urllib.parse import quote_plus
 
-import logging
 import httpx
 from unidecode import unidecode
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
-from urllib.parse import quote_plus
 from psycopg_pool import ConnectionPool
-
 
 from webhook import router as webhook_router
 from offer_rules import build_offer
@@ -30,15 +28,10 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("paginatto")
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+# -------------------- App --------------------
+app = FastAPI(title="Paginatto Bot", version="2.3.0")
 
-if DATABASE_URL:
-    dsn = DATABASE_URL
-
-# -------------------- App (UMA vez) --------------------
-app = FastAPI(title="Paginatto Bot", version="2.2.0")
-
-# -------------------- Config de marca/assistente --------------------
+# -------------------- Marca/assistente --------------------
 ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Iara").strip()
 BRAND_NAME     = os.getenv("BRAND_NAME", "Paginatto").strip()
 
@@ -55,10 +48,9 @@ ZAPI_BASE     = (os.getenv("ZAPI_BASE") or "").strip().rstrip("/")
 if ZAPI_BASE:
     ZAPI_MSG_URL = ZAPI_BASE
 elif ZAPI_INSTANCE and ZAPI_TOKEN:
-    # endpoint clássico de envio de texto
     ZAPI_MSG_URL = f"https://api.z-api.io/instances/{ZAPI_INSTANCE}/token/{ZAPI_TOKEN}/send-text"
 else:
-    ZAPI_MSG_URL = ""  # permanece vazio; validação pode ocorrer no uso
+    ZAPI_MSG_URL = ""
 
 # -------------------- Webhook secrets (opcionais) --------------------
 CARTPANDA_WEBHOOK_SECRET = (os.getenv("CARTPANDA_WEBHOOK_SECRET") or "").strip()
@@ -75,27 +67,37 @@ try:
 except Exception:
     rds = None
 
-# -------------------- Banco (pool no app.state) --------------------
-else:
-    # fallback (usa conexão DIRETA, porta 5432)
-    DB_HOST = os.environ["DB_HOST"]
-    DB_USER = os.environ["DB_USER"]
-    DB_PASSWORD = os.environ["DB_PASSWORD"]
-    DB_NAME = os.environ.get("DB_NAME", "postgres")
-    DB_PORT = os.environ.get("DB_PORT", "5432")         # <= 5432, não 6543
-    DB_SSLMODE = os.environ.get("DB_SSLMODE", "require")
-    dsn = (
-        f"postgresql://{DB_USER}:{quote_plus(DB_PASSWORD)}@"
-        f"{DB_HOST}:{DB_PORT}/{DB_NAME}?sslmode={DB_SSLMODE}"
-    )
+# -------------------- Banco de dados --------------------
+def build_dsn() -> str:
+    """
+    Constrói o DSN do Postgres. Se o usuário informar URL do *pooler* (porta 6543),
+    convertemos para a conexão direta (hostname *.aws.* e porta 5432).
+    """
+    url = (os.getenv("DATABASE_URL") or "").strip()
+    if url:
+        # Corrige pooler -> direto
+        if ".pooler." in url:
+            url = url.replace(".pooler.", ".aws.").replace(":6543", ":5432")
+        safe = re.sub(r":([^:@/]+)@", r":********@", url)  # mascara senha
+        log.info("Usando DSN: %s", safe)
+        return url
 
-# log sem senha, só pra conferir host/porta
-safe = dsn.replace(DB_PASSWORD, "********") if not DATABASE_URL else dsn
-log.info("Usando DSN: %s", safe)
+    host = os.environ["DB_HOST"]
+    # corrige pooler se vier via partes
+    host = host.replace(".pooler.", ".aws.")
+    user = os.environ["DB_USER"]
+    pwd  = os.environ["DB_PASSWORD"]
+    name = os.environ.get("DB_NAME", "postgres")
+    port = os.environ.get("DB_PORT", "5432")
+    sslm = os.environ.get("DB_SSLMODE", "require")
 
-pool = ConnectionPool(dsn, min_size=1, max_size=2, kwargs={"connect_timeout": 5})
+    dsn = f"postgresql://{user}:{quote_plus(pwd)}@{host}:{port}/{name}?sslmode={sslm}"
+    log.info("Usando DSN: %s", dsn.replace(quote_plus(pwd), "********"))
+    return dsn
 
-# cria o pool no startup e fecha no shutdown
+def create_pool() -> ConnectionPool:
+    return ConnectionPool(conninfo=build_dsn(), min_size=1, max_size=5, kwargs={"connect_timeout": 5})
+
 @app.on_event("startup")
 def _startup():
     app.state.pool = create_pool()
@@ -111,32 +113,32 @@ def _shutdown():
 
 @app.get("/ping")
 def ping(request: Request):
-    pool = request.app.state.pool
+    pool: ConnectionPool = request.app.state.pool
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
     return {"ok": True}
 
-# -------------------- Saúde/diagnóstico simples --------------------
+# -------------------- Saúde/diagnóstico --------------------
 @app.get("/health")
 def health():
     return {
         "ok": True,
         "brand": BRAND_NAME,
         "assistant": ASSISTANT_NAME,
-        "zapi_configured": bool(ZAPI_MSG_URL),
+        "zapi_configured": bool(ZAPI_MSG_URL and CLIENT_TOKEN),
         "redis": bool(rds),
     }
 
-# -------------------- Exceções globais (opcional) --------------------
+# -------------------- Exceções globais --------------------
 @app.exception_handler(Exception)
 async def on_any_error(_, exc: Exception):
     log.exception("Erro não tratado")
     return JSONResponse(status_code=500, content={"ok": False, "error": "internal_error"})
 
 # -------------------- Estado (Redis/memória) --------------------
-_MEM: Dict[str, Tuple[datetime, str]] = {}  # fallback em memória
+_MEM: Dict[str, Tuple[datetime, str]] = {}
 
 def now_utc() -> datetime:
     return datetime.utcnow()
@@ -195,14 +197,14 @@ def clear_ctx(phone: str) -> None:
         log.warning("Redis indisponível (clear), usando memória: %s", e)
     _MEM.pop(key, None)
 
-# -------------------- Catálogo (JSON com aliases) --------------------
+# -------------------- Catálogo --------------------
 CATALOG_PATH  = os.getenv("CATALOG_PATH", "catalog.json").strip()
 CATALOG_JSON_ENV = os.getenv("CATALOG_JSON", "").strip()
 
 Catalog: List[Dict[str, Any]] = []
 CatalogBySKU: Dict[str, Dict[str, Any]] = {}
-AliasIndex: Dict[str, str] = {}          # alias/token -> sku
-FamilyIndex: Dict[str, List[str]] = {}   # family -> [skus]
+AliasIndex: Dict[str, str] = {}
+FamilyIndex: Dict[str, List[str]] = {}
 
 def _infer_family(item: Dict[str, Any]) -> str:
     fam = (item.get("family") or "").strip().lower()
@@ -218,120 +220,137 @@ def _safe_tokens(text: str) -> List[str]:
     return re.findall(r"[a-z0-9]+", (text or "").lower(), flags=re.UNICODE)
 
 def _load_catalog() -> List[Dict[str, Any]]:
-    # 1) variável de ambiente CATALOG_JSON (texto JSON)
     if CATALOG_JSON_ENV:
         try:
             return json.loads(CATALOG_JSON_ENV)
         except Exception as e:
             log.warning("Falha lendo CATALOG_JSON do .env: %s", e)
-    # 2) arquivo catalog.json
     try:
         if os.path.exists(CATALOG_PATH):
             with open(CATALOG_PATH, "r", encoding="utf-8") as fh:
                 return json.load(fh)
     except Exception as e:
         log.warning("Falha lendo %s: %s", CATALOG_PATH, e)
-    # 3) fallback mínimo
-    return  [
+    # fallback mínimo
+    return [
       {
         "sku": "TABIB_V1",
+        "family": "tabib",
+        "type": "volume",
         "name": "Tabib Volume 1: Tratamento de Dores e Inflamações",
-        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919679:1",
         "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-1.png",
-        "aliases": ["tabib 1","tabib1","v1","volume 1","inflamacoes","tratamento de dores"],
+        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919679:1",
         "description": "Guia para combater dores de cabeça, musculares e articulares, além de inflamações crônicas.",
-        "family": "tabib"
+        "aliases": ["tabib 1","tabib1","v1","volume 1","inflamacoes","inflamações","tratamento de dores","dores","dor","inflamação","inflamacao"],
       },
       {
         "sku": "TABIB_V2",
+        "family": "tabib",
+        "type": "volume",
         "name": "Tabib Volume 2: Saúde Respiratória e Imunidade",
-        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919682:1",
         "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-2.png",
-        "aliases": ["tabib 2","tabib2","v2","volume 2","respiratoria","imunidade"],
+        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919682:1",
         "description": "Focado na saúde respiratória e fortalecimento da imunidade.",
-        "family": "tabib"
+        "aliases": ["tabib 2","tabib2","v2","vol 2","volume 2","respiratoria","respiratória","pulmão","pulmao","imunidade","gripe","resfriado"],
       },
       {
         "sku": "TABIB_V3",
+        "family": "tabib",
+        "type": "volume",
         "name": "Tabib Volume 3: Saúde Digestiva e Metabólica",
-        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919686:1",
         "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-3.png",
-        "aliases": ["tabib 3","tabib3","v3","volume 3","digestiva","metabolica"],
+        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919686:1",
         "description": "Receitas para equilíbrio digestivo e regulação do metabolismo.",
-        "family": "tabib"
+        "aliases": ["tabib 3","tabib3","v3","vol 3","volume 3","digestiva","metabólica","metabolica","intestino","refluxo","azia"],
       },
       {
         "sku": "TABIB_V4",
+        "family": "tabib",
+        "type": "volume",
         "name": "Tabib Volume 4: Saúde Mental e Energética",
-        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/1669197:1",
         "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-4.png",
-        "aliases": ["tabib 4","tabib4","v4","volume 4","saude mental","energia"],
+        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919701:1",
         "description": "Bem-estar emocional, redução do estresse e aumento da energia.",
-        "family": "tabib"
-      },
-      {
-        "sku": "TABIB_24_25_BUNDLE",
-        "name": "Tabib 2025 + Bônus 19,90 + Tabib 2024",
-        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/184229263:1",
-        "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-2025-bonus-2024.png",
-        "aliases": ["tabib 2025","tabib 2024","tabib pacote","tabib combo","todos","bundle"],
-        "description": "Pacote com as edições 2025 e 2024.",
-        "family": "tabib"
+        "aliases": ["tabib 4","tabib4","v4","vol 4","volume 4","saude mental","saúde mental","energia","estresse","ansiedade","sono"],
       },
       {
         "sku": "TABIB_FULL",
+        "family": "tabib",
+        "type": "bundle",
         "name": "Tabib completo",
-        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/184229277:1",
         "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-completo.png",
-        "aliases": ["tabib completo","colecao tabib","coleção tabib","bundle tabib","todos os volumes"],
+        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/184229277:1",
         "description": "Coletânea com todos os volumes Tabib.",
-        "family": "tabib"
+        "aliases": ["tabib completo","colecao tabib","coleção tabib","bundle tabib","todos os volumes"],
       },
       {
-        "sku": "TABIB_KIDS,kids, criança,neto",
-        "name": "Tabib Kids : Tratamento exclusivo para crianças",
-        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/198003903:1",
-        "image": "..\\Paginatto\\imagens\\TABIB KIDS.png",
-        "aliases": ["tabib kids","kids","infantil","crianca","criança"],
-        "description": "Tratamentos e receitas adaptadas ao público infantil.",
-        "family": "tabib"
-       },
+        "sku": "TABIB_24_25_BUNDLE",
+        "family": "tabib",
+        "type": "bundle",
+        "name": "Tabib 2025 + Bônus 19,90 + Tabib 2024",
+        "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/tabib-2025-bonus-2024.png",
+        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/184229263:1",
+        "description": "Pacote com as edições 2025 e 2024 (mais de 960 receitas).",
+        "aliases": ["tabib 2025","tabib 2024","tabib pacote","tabib combo","tabib 960 receitas","tabib todos por 19,90","tabib 19,90"],
+      },
       {
-        "sku": "ANTIDOTO,antídoto",
+        "sku": "ANTIDOTO",
+        "family": "antidoto",
+        "type": "standalone",
         "name": "Antídoto - Antídotos indígenas",
-        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919637:1",
         "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/antidoto.png",
-        "aliases": ["antidoto","antídoto","o livro antidoto","antidotos indigenas"],
+        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919637:1",
         "description": "Receitas inspiradas em saberes indígenas para antídotos naturais.",
-        "family": "outros"
+        "aliases": ["antidoto","antídoto","o livro antidoto","antidotos indigenas","antídotos indígenas"],
       },
       {
-        "sku": "KURIMA,kurimã",
+        "sku": "KURIMA",
+        "family": "kurima",
+        "type": "standalone",
         "name": "Kurimã - Óleos essenciais",
-        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919661:1",
         "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/kurima.png",
-        "aliases": ["kurima","oleos essenciais","óleos essenciais"],
+        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919661:1",
         "description": "Guia prático de óleos essenciais com receitas e usos seguros.",
-        "family": "outros"
+        "aliases": ["kurima","oleos essenciais","óleos essenciais","oleo essencial"],
       },
       {
-        "sku": "BALSAMO,bálsamo,balsamo",
+        "sku": "BALSAMO",
+        "family": "balsamo",
+        "type": "standalone",
         "name": "Bálsamo - Pomadas naturais",
-        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919668:1",
         "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/balsamo.png",
-        "aliases": ["balsamo","pomadas naturais","pomada natural"],
+        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/166919668:1",
         "description": "Fórmulas de pomadas naturais para dores, feridas e inflamações.",
-        "family": "outros"
+        "aliases": ["balsamo","pomadas naturais","pomada natural"],
       },
       {
-        "sku": "AIRFRYER_PREMIUM,air fryer, air frair",
-        "name": "Airfryer do Chef PREMIUM - 14,90",
+        "sku": "PRESSAO_ALTA_PLAN",
+        "family": "pressao",
+        "type": "standalone",
+        "name": "Tratamento Natural Personalizado para Pressão Alta",
+        "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/pressao-alta.png",
+        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/174502432:1",
+        "description": "Plano individualizado com alimentação, ervas e exercícios.",
+        "aliases": ["pressao alta","hipertensao","tratamento personalizado","hipertensão"],
+      },
+      {
+        "sku": "AIRFRYER_PREMIUM",
+        "family": "airfryer",
+        "type": "standalone",
+        "name": "Airfryer do Chef PREMIUM",
         "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/198180560:1",
-        "image": "https://paginattoebooks.github.io/Paginatto.site.com.br/img/airfryer-300.png",
-        "aliases": ["airfryer","receitas airfryer","300 receitas","air frir","air frair","air fryer"],
-        "description": "Receitas rápidas, crocantes e mais leves para sua airfryer.",
-        "family": "airfryer"
-      }
+        "description": "Este guia reúne receitas rápidas e variadas — de lanches a refeições completas — todas pensadas para reduzir calorias sem abrir mão do sabor",
+        "aliases": ["airfryer","receitas airfryer","300 receitas","300 receitas para airfryer"],
+      },
+      {
+        "sku": "DOCES_SEM_ACUCAR",
+        "family": "airfryer",
+        "type": "standalone",
+        "name": "Doces sem açúcar - MAIS DE 110 RECEITAS",
+        "checkout": "https://somasoundsolutions.mycartpanda.com/checkout/198181424:1",
+        "description": "Prepare bolos, mousses, tortas e guloseimas usando adoçantes naturais e combinações equilibradas.",
+        "aliases": ["airfryer","receitas airfryer","Doces sem açúcar","300 receitas para airfryer","doces","sem açúcar"],
+      },
     ]
 
 def _index_catalog() -> None:
@@ -348,9 +367,8 @@ def _index_catalog() -> None:
             continue
         it["family"] = _infer_family(it)
         CatalogBySKU[sku] = it
-        # indexa aliases + nome tokenizado
+
         aliases = list(set((it.get("aliases") or []) + [name]))
-        # cria aliases automáticos para Tabib volumes
         if it["family"] == "tabib":
             m = re.search(r"volume\s*(\d+)", name.lower())
             if m:
@@ -359,14 +377,14 @@ def _index_catalog() -> None:
         for a in aliases:
             for tok in _safe_tokens(a):
                 AliasIndex[tok] = sku
-        # família
+
         FamilyIndex.setdefault(it["family"], []).append(sku)
 
     log.info("Catálogo carregado: %d itens; famílias: %s", len(Catalog), list(FamilyIndex.keys()))
 
 _index_catalog()
 
-# ---------- Descrição completa ----------
+# ---------- Descrição ----------
 def get_full_desc(it: Dict[str, Any]) -> str:
     for k in ("full_description","descricao_completa","descrição_completa","descricao","descrição","description","desc"):
         v = it.get(k)
@@ -389,15 +407,12 @@ def find_by_text(text: str) -> List[Dict[str, Any]]:
         sku = AliasIndex.get(t)
         if sku and sku in CatalogBySKU:
             hits.append(CatalogBySKU[sku])
-    # se não achou por alias, tenta por nome contendo todos tokens
     if not hits and toks:
         for it in Catalog:
             nm = (it.get("name") or "").lower()
             if all(tok in nm for tok in toks):
                 hits.append(it)
-    # remove duplicados preservando ordem
-    seen = set()
-    out = []
+    seen, out = set(), []
     for it in hits:
         s = it["sku"]
         if s not in seen:
@@ -406,28 +421,20 @@ def find_by_text(text: str) -> List[Dict[str, Any]]:
 
 def menu_tabib_text() -> str:
     vols = []
-    for v in ["TABIB_V1","TABIB_V2","TABIB_V3","TABIB_V4","TABIB_KIDS"]:
+    for v in ["TABIB_V1","TABIB_V2","TABIB_V3","TABIB_V4"]:
         if v in CatalogBySKU:
             vols.append(CatalogBySKU[v]["name"])
-    opt5 = None
-    if "TABIB_24_25_BUNDLE" in CatalogBySKU:
-        opt5 = CatalogBySKU["TABIB_24_25_BUNDLE"]["name"]
-    elif "TABIB_FULL" in CatalogBySKU:
-        opt5 = CatalogBySKU["TABIB_FULL"]["name"]
-    lines = []
-    for i, nm in enumerate(vols, start=1):
-        lines.append(f"{i}) {nm}")
+    opt5 = "TABIB_24_25_BUNDLE" if "TABIB_24_25_BUNDLE" in CatalogBySKU else ("TABIB_FULL" if "TABIB_FULL" in CatalogBySKU else None)
+    lines = [f"{i}) {nm}" for i, nm in enumerate(vols, start=1)]
     if opt5:
-        lines.append(f"5) {opt5}")
-    if not lines:
-        lines = ["1) Tabib (todos)", "2) Volumes unitários", "3) Voltar"]
+        lines.append(f"5) {CatalogBySKU[opt5]['name']}")
     header = "Temos estas opções do *Tabib*: \n"
     footer = "\nResponda com o número (1–5) ou diga, por ex., 'v3' / 'volume 3'."
     return header + "\n".join(lines) + footer
 
 def tabib_unitarios_list_text() -> str:
     vols, idx = [], 1
-    for sku in ["TABIB_V1", "TABIB_V2", "TABIB_V3", "TABIB_V4", "TABIB_KIDS"]:
+    for sku in ["TABIB_V1", "TABIB_V2", "TABIB_V3", "TABIB_V4"]:
         if sku in CatalogBySKU:
             vols.append(f"{idx}) {CatalogBySKU[sku]['name']}")
             idx += 1
@@ -453,7 +460,6 @@ def find_tabib_choice_by_number(num: str) -> Optional[Dict[str, Any]]:
         3: "TABIB_V3",
         4: "TABIB_V4",
         5: "TABIB_24_25_BUNDLE" if "TABIB_24_25_BUNDLE" in CatalogBySKU else "TABIB_FULL",
-        6: "TABIB_KIDS"
     }
     sku = mapping.get(i)
     if sku and sku in CatalogBySKU:
@@ -532,12 +538,10 @@ STOP_PATTERNS   = [
     r"\bsair\b", r"\bremover\b", r"\bexcluir\b", r"\bdescadastrar\b",
     r"n[aã]o quero (conversar|falar)", r"n[aã]o me (chame|incomode|envie|mande)"
 ]
-
 TRUST_PATTERNS = [
     r"\bgolpe(s)?\b", r"\bfraude(s)?\b", r"\bscam\b", r"\bfake\b",
     r"\bseguran[çc]a\b", r"\bsegur[ao]\b", r"\bconfi[aá]vel\b", r"\bconfian[çc]a\b"
 ]
-
 INTENTS: Dict[str, List[str]] = {
     "greeting": [r"\b(oi|ola|eai|boa noite|boa tarde|bom dia)\b"],
     "thanks":   [r"\bobrigado?\b|\bvaleu\b"],
@@ -558,10 +562,8 @@ INTENTS: Dict[str, List[str]] = {
     "trust":    TRUST_PATTERNS,
 }
 _RE_URL        = re.compile(r"https?://\S+|www\.\S+", re.I)
-_RE_MULTICHAR  = re.compile(r"(.)\1{2,}")          # "boooom" -> "boom"
-_RE_NON_ALNUM  = re.compile(r"[^a-z0-9]+", re.I)   # troca tudo que não é [a-z0-9] por espaço
-
-# sinônimos/abreviações comuns -> palavra “canônica”
+_RE_MULTICHAR  = re.compile(r"(.)\1{2,}")
+_RE_NON_ALNUM  = re.compile(r"[^a-z0-9]+", re.I)
 _SYNONYMS = (
     (r"\bobg\b|\bvlw\b|\bvaleu\b", " obrigado "),
     (r"\bpfv\b|\bpls\b|\bpor favor\b", " por favor "),
@@ -572,30 +574,24 @@ _SYNONYMS = (
 )
 
 def normalize_text(s: str) -> str:
-    """minúsculas, sem acento, sem url/emojis, sem repetições exageradas, com sinônimos normalizados."""
     s = unidecode(str(s or "").lower())
     s = _RE_URL.sub(" ", s)
     for pat, repl in _SYNONYMS:
         s = re.sub(pat, repl, s)
-    s = _RE_MULTICHAR.sub(r"\1\1", s)         # "boooaaar" -> "boaar"
-    s = _RE_NON_ALNUM.sub(" ", s)             # só letras/números
+    s = _RE_MULTICHAR.sub(r"\1\1", s)
+    s = _RE_NON_ALNUM.sub(" ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
 def matches(text: str, patterns: List[str]) -> bool:
-    """Usa o texto normalizado para casar os regex declarados em INTENTS."""
     t = normalize_text(text)
     return any(re.search(p, t) for p in patterns)
 
 def detect_intent(text: str) -> str:
-    """Primeiro tenta INTENTS; depois regras de fallback (sim/não/comprei/desisti)."""
     t = normalize_text(text)
-
     for intent, patterns in INTENTS.items():
         if any(re.search(p, t) for p in patterns):
             return intent
-
-    # fallbacks simples (após normalização não há acento)
     if re.search(r"\b(sim|1)\b", t):
         return "yes"
     if re.search(r"\b(nao|2)\b", t):
@@ -604,18 +600,10 @@ def detect_intent(text: str) -> str:
         return "bought"
     if re.search(r"\b(desisti|nao vou|depois)\b", t):
         return "quit"
-
     return "unknown"
 
-# -------------------- Normalizador do corpo Z-API --------------------
+# -------------------- Normalizador Z-API --------------------
 def extract_phone_and_text(body: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Normaliza vários formatos da Z-API:
-      - { "phone": "...", "text": "..." }
-      - { "phone": "...", "text": {"message": "..."} }
-      - { "message": {"phone": "...", "text": "..."} }
-      - { "data": {"message": {"from": "...", "text": "..."} } }
-    """
     def as_text(x: Any) -> Optional[str]:
         if x is None:
             return None
@@ -647,7 +635,6 @@ def extract_phone_and_text(body: Dict[str, Any]) -> Tuple[Optional[str], Optiona
     text = as_text(text)
     return normalize_phone(phone), (text.strip() if isinstance(text, str) else None)
 
-# ------------ Detectar áudio/ligação ------------
 def is_audio_or_call(body: Dict[str, Any]) -> bool:
     def _typ(d: Dict[str, Any]) -> str:
         return (d.get("type") or d.get("messageType") or "").lower()
@@ -660,19 +647,7 @@ def is_audio_or_call(body: Dict[str, Any]) -> bool:
         return True
     return False
 
-# -------------------- Webhook CartPanda ----------------
-"""
-Esperado: CartPanda envia um webhook quando:
-- checkout_abandoned
-- pix_pending (pedido gerou link e não pagou)
-Payload mínimo esperado (adapte aos seus campos reais):
-{
-  "event": "checkout_abandoned" | "pix_pending",
-  "customer": {"name": "Fulano", "phone": "11988887777"},
-  "product":  {"name": "Tabib 2025", "checkout_url": "https://..."},
-  "order":    {"id": "ABC123", "total": 29.9}
-}
-"""
+# -------------------- Webhook CartPanda --------------------
 @app.post("/webhook/cartpanda")
 async def cartpanda_webhook(
     request: Request,
@@ -698,18 +673,17 @@ async def cartpanda_webhook(
         return JSONResponse({"ok": False, "reason": "missing phone or product"}, status_code=200)
 
     flow = "abandoned" if event == "checkout_abandoned" else ("pix_pending" if event == "pix_pending" else "unknown")
-
     fam_guess = _infer_family({"name": product_name})
 
     ctx: Dict[str, Any] = {
         "flow": flow,
         "name": name,
         "product_name": product_name,
-        "product_key": fam_guess,             # "airfryer" | "tabib" | "masterchef" | "outros"
+        "product_key": fam_guess,
         "selected_product": fam_guess or "",
         "checkout_url": checkout_url,
         "created_at": now_utc().isoformat(),
-        "stage": "verify",                    # verify -> pick_product -> tabib_menu -> checkout
+        "stage": "verify",
         "confirmed_owner": False,
         "asked": None,
         "last_intent": None,
@@ -722,7 +696,7 @@ async def cartpanda_webhook(
     await zapi_send_text(phone, first)
     return {"ok": True, "flow": flow}
 
-# -------------------- Intent handler (global) --------------------
+# -------------------- Intent handler --------------------
 async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str) -> Dict[str, Any]:
     name           = ctx.get("name") or ""
     product_name   = ctx.get("product_name") or ""
@@ -730,11 +704,9 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
     flow           = ctx.get("flow") or "unknown"
     stage          = ctx.get("stage") or "verify"
 
-    # 0) Item específico (ex.: "tabib v2")
     items = find_by_text(text)
     if items:
         it = items[0]
-        # Tabib V1–V4 → descrição + pergunta
         if it.get("family") == "tabib" and it.get("sku","").startswith("TABIB_V"):
             msg = describe_item(it) + "\n\nQuer ver *todos* por 19,90 ou *unitários*?"
             await zapi_send_text(phone, msg)
@@ -745,7 +717,6 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
             store_ctx(phone, ctx)
             return {"ok": True}
 
-        # Outros itens → descrição + oferta + checkout
         headline, detail = build_offer(it.get("name",""))
         link = it.get("checkout") or ctx.get("checkout_url","")
         set_checkout_stage(ctx)
@@ -753,7 +724,6 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
         await zapi_send_text(phone, f"{describe_item(it)}\n\n{headline}\n{detail}\n\nLink para concluir: {link}")
         return {"ok": True}
 
-    # 1) Detecta família por palavras
     pk_from_text = detect_product_key(text or "")
     if pk_from_text:
         ctx["selected_product"] = pk_from_text
@@ -785,19 +755,16 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
                 await zapi_send_text(phone, f"{headline}\n{detail}\n\nAcesse: {SITE_URL}")
             return {"ok": True}
 
-    # opt-out / parar
     if intent in ("stop", "quit"):
         await zapi_send_text(phone, "Entendido. Vou encerrar por aqui. 🙏 Se mudar de ideia, é só chamar. Boa semana!")
         clear_ctx(phone)
         return {"ok": True}
 
-    # pós-compra
     if intent == "bought":
         clear_ctx(phone)
         await zapi_send_text(phone, "Obrigada pela compra! 🎉 Qualquer dúvida, estamos à disposição por aqui.")
         return {"ok": True}
 
-    # SEGURANÇA / CONFIANÇA
     if intent == "trust":
         msg = (
             f"Entendo sua preocupação. Pode ficar tranquilo(a)! Somos a *{LEGAL_NAME}* (CNPJ **{LEGAL_CNPJ}**) — empresa real, "
@@ -809,7 +776,6 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
         store_ctx(phone, ctx)
         return {"ok": True}
 
-    # entrega
     if intent == "shipping":
         await zapi_send_text(
             phone,
@@ -821,7 +787,6 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
         store_ctx(phone, ctx)
         return {"ok": True}
 
-    # pagamento
     if intent == "payment":
         await zapi_send_text(
             phone,
@@ -831,7 +796,6 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
         store_ctx(phone, ctx)
         return {"ok": True}
 
-    # preço / desconto / validade
     if intent in ("price", "discount", "deadline"):
         headline, detail = build_offer(product_name or "seu produto")
         extra = "\n*Validade:* promoções podem ser por tempo limitado." if intent == "deadline" else ""
@@ -840,7 +804,6 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
         store_ctx(phone, ctx)
         return {"ok": True}
 
-    # link direto (site)
     if intent == "link":
         await zapi_send_text(
             phone,
@@ -850,7 +813,6 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
         store_ctx(phone, ctx)
         return {"ok": True}
 
-    # dúvidas gerais
     if intent == "product_info":
         await zapi_send_text(
             phone,
@@ -860,7 +822,6 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
         store_ctx(phone, ctx)
         return {"ok": True}
 
-    # e-mail não recebido / reenvio
     if intent == "email_missing":
         await zapi_send_text(
             phone,
@@ -877,7 +838,6 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
         store_ctx(phone, ctx)
         return {"ok": True}
 
-    # educação
     if intent == "greeting":
         if not ctx.get("confirmed_owner"):
             await zapi_send_text(phone, f"Oi, aqui é {ASSISTANT_NAME} da {BRAND_NAME}. Como posso ajudar?")
@@ -891,13 +851,11 @@ async def handle_intent(phone: str, ctx: Dict[str, Any], text: str, intent: str)
         store_ctx(phone, ctx)
         return {"ok": True}
 
-    # não entendi
     if intent == "unknown":
         await zapi_send_text(phone, "Não entendi, pode me dizer novamente?")
         store_ctx(phone, ctx)
         return {"ok": True}
 
-    # fallback por fluxo
     if flow == "pix_pending":
         msg = f"Detectei um PIX pendente de *{product_name or 'seu pedido'}*. Quer que eu reenvie o QR/link agora?"
     else:
@@ -919,7 +877,6 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
     stage = ctx.get("stage") or "verify"
     tlow = (text or "").strip().lower()
 
-    # prioriza produto citado em qualquer fase
     pk_from_text = detect_product_key(text or "")
     if pk_from_text:
         ctx["selected_product"] = pk_from_text
@@ -953,7 +910,6 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
                 )
                 return {"ok": True}
 
-    # ===== CHECKOUT =====
     if stage == "checkout":
         if offer_expired(ctx):
             await zapi_send_text(
@@ -965,7 +921,6 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
             return {"ok": True}
         return await handle_intent(phone, ctx, text, detect_intent(text))
 
-    # ===== VERIFY =====
     if stage == "verify":
         if is_option(tlow, "1", "sim", "sou eu", "isso mesmo", "eu"):
             ctx["confirmed_owner"] = True
@@ -974,7 +929,7 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
             await zapi_send_text(
                 phone,
                 "Legal! Qual produto você quer?\n"
-                "• Se for *Tabib*, posso te mostrar as 5 opções (volumes 1–4 + pacote 2025/2024)."
+                "• Se for *Tabib*, posso te mostrar as opções (volumes + pacote)."
             )
             return {"ok": True}
 
@@ -985,7 +940,6 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
 
         return await handle_intent(phone, ctx, text, detect_intent(text))
 
-    # ===== PICK_PRODUCT =====
     if stage == "pick_product":
         if "tabib" in tlow:
             ctx["stage"] = "tabib_menu"
@@ -1016,13 +970,10 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
         )
         return {"ok": True}
 
-    # ===== TABIB_MENU =====
     if stage == "tabib_menu":
         asked = ctx.get("asked") or ""
 
-        # --- escolhas do menu principal (1/2/3) ---
         if asked == "tabib_main":
-            # 1) TODOS (bundle/full)
             if tlow in {"1", "todos", "bundle", "pacote"}:
                 it = CatalogBySKU.get("TABIB_24_25_BUNDLE") or CatalogBySKU.get("TABIB_FULL")
                 if it:
@@ -1037,14 +988,12 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
                     )
                     return {"ok": True}
 
-            # 2) UNITÁRIOS → lista volumes
             if tlow in {"2", "unitario", "unitarios", "unitários"}:
                 ctx["asked"] = "tabib_pick_unit"
                 store_ctx(phone, ctx)
                 await zapi_send_text(phone, tabib_unitarios_list_text())
                 return {"ok": True}
 
-            # 3) VOLTAR
             if tlow in {"3", "voltar", "back"}:
                 ctx["stage"] = "pick_product"
                 ctx["asked"] = None
@@ -1052,9 +1001,7 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
                 await zapi_send_text(phone, "Ok! Qual produto você quer ver agora?")
                 return {"ok": True}
 
-        # --- após descrição do volume (todos x unitários) ---
         if asked == "tabib_after_desc":
-            # cliente pediu link direto
             if detect_intent(text) == "link":
                 sku = ctx.get("last_item_sku")
                 it = CatalogBySKU.get(sku) if sku else None
@@ -1066,7 +1013,6 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
                     await zapi_send_text(phone, f"{headline}\n{detail}\n\nLink para concluir: {link}")
                     return {"ok": True}
 
-            # cliente pediu TODOS
             if re.search(r"\b(todos|bundle|pacote|19[,\.]?90)\b", tlow):
                 it = CatalogBySKU.get("TABIB_24_25_BUNDLE") or CatalogBySKU.get("TABIB_FULL")
                 if it:
@@ -1080,20 +1026,16 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
                     )
                     return {"ok": True}
 
-            # cliente pediu UNITÁRIOS
             if re.search(r"\bunit[aá]ri[oa]s?\b", tlow) or tlow in {"2", "unitario", "unitarios", "unitários"}:
                 ctx["asked"] = "tabib_pick_unit"
                 store_ctx(phone, ctx)
                 await zapi_send_text(phone, tabib_unitarios_list_text())
                 return {"ok": True}
 
-            # fallback dessa etapa
             await zapi_send_text(phone, "Não entendi, prefere *todos* por 19,90 ou ver *unitários*?")
             return {"ok": True}
 
-        # --- lista de unitários: escolher por número (1–4) ou por 'v2' / 'volume 2' ---
         if asked == "tabib_pick_unit":
-            # número 1–4
             if re.fullmatch(r"[1-4]", tlow):
                 it = find_tabib_choice_by_number(tlow)
                 if it:
@@ -1108,7 +1050,6 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
                     )
                     return {"ok": True}
 
-            # textos tipo "v3", "volume 2", "tabib 4"
             items = find_by_text(text)
             if items and items[0].get("family") == "tabib":
                 it = items[0]
@@ -1123,14 +1064,12 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
                 )
                 return {"ok": True}
 
-            # reforço
             await zapi_send_text(
                 phone,
                 "Não peguei. Responda com o número (1–4) ou diga o volume, ex.: *v2* / *volume 2*."
             )
             return {"ok": True}
 
-        # --- atalho: usuário digitou só 1..5 enquanto está no menu Tabib ---
         if re.fullmatch(r"\s*[1-5]\s*", tlow):
             it = find_tabib_choice_by_number(tlow.strip())
             if it:
@@ -1145,24 +1084,20 @@ async def route_stage(phone: str, ctx: Dict[str, Any], text: str) -> Dict[str, A
                 )
                 return {"ok": True}
 
-        # --- fallback do menu Tabib ---
         await zapi_send_text(
             phone,
             "Não entendi. Responda *1* para todos, *2* para unitários, ou diga o volume (ex.: *v3*)."
         )
         return {"ok": True}
 
-    # fallback geral
     return await handle_intent(phone, ctx, text, detect_intent(text))
 
-
-# -------------------- Z-API inbound webhook (mensagens recebidas) --------------------
+# -------------------- Z-API inbound --------------------
 @app.post("/webhook/zapi")
 async def zapi_webhook(
     request: Request,
     x_zapi_secret: Optional[str] = Header(None),
 ):
-    # Durante testes, não falhe com 401
     if ZAPI_WEBHOOK_SECRET and x_zapi_secret != ZAPI_WEBHOOK_SECRET:
         log.warning("Z-API secret inválido (ignorado em teste).")
         return {"ok": True, "note": "invalid secret (ignored in test)"}
@@ -1195,7 +1130,6 @@ async def zapi_webhook(
 
     phone, text = extract_phone_and_text(body)
 
-    # áudio/ligação não suportados
     if is_audio_or_call(body):
         if phone:
             await zapi_send_text(phone, "No momento não conseguimos ouvir áudio e nem atender ligações. Pode escrever por aqui?")
@@ -1206,7 +1140,6 @@ async def zapi_webhook(
 
     ctx = read_ctx(phone)
 
-    # Mensagem solta (sem contexto)
     if not ctx:
         await zapi_send_text(phone, f"Oi, aqui é {ASSISTANT_NAME} da {BRAND_NAME}. Como posso ajudar?")
         ctx = {
@@ -1227,7 +1160,6 @@ async def zapi_webhook(
         store_ctx(phone, ctx)
         return {"ok": True}
 
-    # confirmação inicial do dono do número
     if not ctx.get("confirmed_owner"):
         if matches(text, YES_PATTERNS) or text.lower() in {"sou eu", "isso mesmo", "eu", "1"}:
             ctx["confirmed_owner"] = True
@@ -1239,15 +1171,14 @@ async def zapi_webhook(
             await zapi_send_text(phone, f"Sou {ASSISTANT_NAME} da {BRAND_NAME}. Posso te ajudar a finalizar o pedido?")
             return {"ok": True}
 
-    # roteamento por estágio
     ctx["last_intent"] = detect_intent(text)
     store_ctx(phone, ctx)
     return await route_stage(phone, ctx, text)
 
-# Evita 404 da Z-API para pings de status
 @app.post("/webhook/zapi/status")
 async def zapi_status():
     return {"ok": True}
 
-# Inclui rotas do webhook (banco/cartpanda persist)
+# -------------------- Outras rotas (persist/cartpanda) --------------------
 app.include_router(webhook_router, prefix="/webhook")
+
