@@ -86,9 +86,16 @@ def build_dsn() -> str:
     return url
 
 def create_pool() -> ConnectionPool:
-    dsn = build_dsn()
-    return ConnectionPool(dsn, min_size=1, max_size=2, kwargs={"connect_timeout": 5})
-
+    dsn = build_dsn()  # NÃO altere host/porta; use o que vier do DATABASE_URL
+    return ConnectionPool(
+        dsn,
+        min_size=1,
+        max_size=2,
+        kwargs={
+            "connect_timeout": 5,
+            "prepare_threshold": 0,  # <- chave para PgBouncer
+        },
+    )
 
 # -------------------- Banco (pool no app.state) --------------------
 # NÃO crie o pool aqui. Crie no startup com create_pool().
