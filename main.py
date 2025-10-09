@@ -72,10 +72,24 @@ except Exception:
 
 def force_ipv4_in_dsn(url: str) -> str:
     u = urlparse(url)
-    infos = socket.getaddrinfo(u.hostname, None, family=socket.AF_INET)  # resolve IPv4
-    ipv4 = infos[0][4][0]
+    try:
+        infos = socket.getaddrinfo(u.hostname, None, 0, 0, 0, 0)  # aceita qualquer família
+    except Exception:
+        # Não conseguiu resolver hostname agora → segue sem forçar IPv4
+        return url
+
+    ipv4 = None
+    for fam, *_rest, sockaddr in infos:
+        if fam == socket.AF_INET:
+            ipv4 = sockaddr[0]
+            break
+    if not ipv4:
+        # Não há A record disponível → segue sem forçar IPv4
+        return url
+
+    # Injeta hostaddr mantendo host para SNI/TLS
     q = dict(parse_qsl(u.query, keep_blank_values=True))
-    q["hostaddr"] = ipv4  # força IPv4 sem perder SNI/TLS via 'host'
+    q["hostaddr"] = ipv4
     new = u._replace(query=urlencode(q))
     return urlunparse(new)
 
@@ -85,7 +99,7 @@ def build_dsn() -> str:
     if not url:
         raise RuntimeError("DATABASE_URL não configurada")
 
-    # Só força IPv4 quando for conexão direta (db.*.supabase.co)
+    # Só tenta forçar IPv4 em conexão direta (db.*.supabase.co)
     if ".pooler.supabase.com" not in url and ".supabase.co" in url:
         url = force_ipv4_in_dsn(url)
 
