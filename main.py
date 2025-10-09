@@ -71,31 +71,14 @@ except Exception:
 def build_dsn() -> str:
     url = (os.getenv("DATABASE_URL") or "").strip()
     if not url:
-        # Fallback só se não existir DATABASE_URL
-        from urllib.parse import quote_plus
-        host = (os.getenv("DB_HOST") or "").strip()
-        user = (os.getenv("DB_USER") or "").strip()
-        pwd  = (os.getenv("DB_PASSWORD") or "").strip()
-        name = (os.getenv("DB_NAME") or "postgres").strip() or "postgres"
-        sslm = (os.getenv("DB_SSLMODE") or "require").strip() or "require"
-        port = (os.getenv("DB_PORT") or ("6543" if ".pooler.supabase.com" in host else "5432")).strip()
-        url = f"postgresql://{user}:{quote_plus(pwd)}@{host}:{port}/{name}?sslmode={sslm}"
-
+        raise RuntimeError("DATABASE_URL não configurada")
     safe = re.sub(r":([^:@/]+)@", r":********@", url)
     log.info("Usando DSN: %s", safe)
     return url
 
 def create_pool() -> ConnectionPool:
-    dsn = build_dsn()  # NÃO altere host/porta; use o que vier do DATABASE_URL
-    return ConnectionPool(
-        dsn,
-        min_size=1,
-        max_size=2,
-        kwargs={
-            "connect_timeout": 5,
-            "prepare_threshold": 0,  # <- chave para PgBouncer
-        },
-    )
+    dsn = build_dsn()
+    return ConnectionPool(dsn, min_size=1, max_size=2, kwargs={"connect_timeout": 5})
 
 # -------------------- Banco (pool no app.state) --------------------
 # NÃO crie o pool aqui. Crie no startup com create_pool().
