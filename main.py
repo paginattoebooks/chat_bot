@@ -9,6 +9,8 @@ import os
 import re
 import json
 import logging
+import socket
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple, List
 from urllib.parse import quote_plus
@@ -67,11 +69,26 @@ try:
 except Exception:
     rds = None
 
+
+def force_ipv4_in_dsn(url: str) -> str:
+    u = urlparse(url)
+    infos = socket.getaddrinfo(u.hostname, None, family=socket.AF_INET)  # resolve IPv4
+    ipv4 = infos[0][4][0]
+    q = dict(parse_qsl(u.query, keep_blank_values=True))
+    q["hostaddr"] = ipv4  # força IPv4 sem perder SNI/TLS via 'host'
+    new = u._replace(query=urlencode(q))
+    return urlunparse(new)
+
 # -------------------- DSN helpers --------------------
 def build_dsn() -> str:
     url = (os.getenv("DATABASE_URL") or "").strip()
     if not url:
         raise RuntimeError("DATABASE_URL não configurada")
+
+    # Só força IPv4 quando for conexão direta (db.*.supabase.co)
+    if ".pooler.supabase.com" not in url and ".supabase.co" in url:
+        url = force_ipv4_in_dsn(url)
+
     safe = re.sub(r":([^:@/]+)@", r":********@", url)
     log.info("Usando DSN: %s", safe)
     return url
