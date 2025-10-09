@@ -69,31 +69,26 @@ except Exception:
 
 # -------------------- DSN helpers --------------------
 def build_dsn() -> str:
-    """
-    Conserta pooler->direto:
-    aws-1-us-east-2.pooler.supabase.com:6543  ->  aws-1-us-east-2.supabase.com:5432
-    """
     url = (os.getenv("DATABASE_URL") or "").strip()
-    if url:
-        if ".pooler." in url:
-            url = url.replace(".pooler.", ".").replace(":6543", ":5432")
-        safe = re.sub(r":([^:@/]+)@", r":********@", url)
-        log.info("Usando DSN: %s", safe)
-        return url
+    if not url:
+        # Fallback só se não existir DATABASE_URL
+        from urllib.parse import quote_plus
+        host = (os.getenv("DB_HOST") or "").strip()
+        user = (os.getenv("DB_USER") or "").strip()
+        pwd  = (os.getenv("DB_PASSWORD") or "").strip()
+        name = (os.getenv("DB_NAME") or "postgres").strip() or "postgres"
+        sslm = (os.getenv("DB_SSLMODE") or "require").strip() or "require"
+        port = (os.getenv("DB_PORT") or ("6543" if ".pooler.supabase.com" in host else "5432")).strip()
+        url = f"postgresql://{user}:{quote_plus(pwd)}@{host}:{port}/{name}?sslmode={sslm}"
 
-    host = (os.environ["DB_HOST"]).replace(".pooler.", ".")
-    user = os.environ["DB_USER"]
-    pwd  = os.environ["DB_PASSWORD"]
-    name = os.environ.get("DB_NAME", "postgres")
-    port = os.environ.get("DB_PORT", "5432")
-    sslm = os.environ.get("DB_SSLMODE", "require")
-    dsn  = f"postgresql://{user}:{quote_plus(pwd)}@{host}:{port}/{name}?sslmode={sslm}"
-    log.info("Usando DSN: %s", dsn.replace(quote_plus(pwd), "********"))
-    return dsn
+    safe = re.sub(r":([^:@/]+)@", r":********@", url)
+    log.info("Usando DSN: %s", safe)
+    return url
 
 def create_pool() -> ConnectionPool:
     dsn = build_dsn()
     return ConnectionPool(dsn, min_size=1, max_size=2, kwargs={"connect_timeout": 5})
+
 
 # -------------------- Banco (pool no app.state) --------------------
 # NÃO crie o pool aqui. Crie no startup com create_pool().
