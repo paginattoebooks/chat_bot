@@ -98,18 +98,21 @@ def build_dsn() -> str:
     url = (os.getenv("DATABASE_URL") or "").strip()
     if not url:
         raise RuntimeError("DATABASE_URL não configurada")
-
-    # Só tenta forçar IPv4 em conexão direta (db.*.supabase.co)
-    if ".pooler.supabase.com" not in url and ".supabase.co" in url:
-        url = force_ipv4_in_dsn(url)
-
     safe = re.sub(r":([^:@/]+)@", r":********@", url)
     log.info("Usando DSN: %s", safe)
     return url
 
 def create_pool() -> ConnectionPool:
-    dsn = build_dsn()
-    return ConnectionPool(dsn, min_size=1, max_size=2, kwargs={"connect_timeout": 5})
+    dsn = build_dsn()  # apenas retorna DATABASE_URL, sem replace de host/porta
+    return ConnectionPool(
+        dsn,
+        min_size=1,
+        max_size=2,
+        kwargs={
+            "connect_timeout": 5,
+            "prepare_threshold": 0,  # evita prepared statements no PgBouncer
+        },
+    )
 
 # -------------------- Banco (pool no app.state) --------------------
 # NÃO crie o pool aqui. Crie no startup com create_pool().
